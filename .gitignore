@@ -1,0 +1,10 @@
+data/
+.idea/
+docs/
+__pycache__/
+.vscode/
+tests/
+/build/
+/webants.egg-info/
+/dist/
+
