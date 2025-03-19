@@ -219,32 +219,53 @@ class Spider:
         pass
 
     async def run_forever(self, many: int = 0):
-        # if not self.downloader_cls:
-        #     self.downloader_cls = await self._init_downloader(**self.kwargs)
+        """
+        以永久运行模式启动爬虫。
 
+        此方法会持续运行爬虫，直到收到退出信号。它会初始化请求，启动所有必要的任务，并在退出时关闭爬虫。
+
+        Args:
+            many (int): 下载器一次下载的最大数量，默认为 0。
+        """
+        # 初始化请求队列，将起始 URL 封装成请求对象放入原生请求队列
         self._start_request()
 
+        # 标记爬虫为运行状态
         self.running = True
 
+        # 记录日志，表明爬虫开始运行
         self.logger.info(f"Start {self.__class__.__name__}...")
 
         try:
+            # 进入无限循环，持续运行爬虫
             while True:
+                # 检查是否收到退出信号
                 if self._exit:
+                    # 记录退出日志
                     self.logger.debug("EXIT")
+                    # 关闭爬虫，取消所有任务并关闭各个组件
                     await self.close()
+                    # 跳出循环，结束运行
                     break
 
+                # 创建并启动多个异步任务
                 tasks = [
+                    # 启动调度器任务，负责管理请求队列
                     asyncio.create_task(self.scheduler.start_scheduler()),
+                    # 启动下载器任务，负责下载页面内容
                     asyncio.create_task(self.downloader.start_downloader(many)),
+                    # 启动爬虫主任务，处理结果队列
                     asyncio.create_task(self.start_spider()),
+                    # 启动解析器任务，解析下载的页面内容
                     asyncio.create_task(self.parser.start_parser()),
                 ]
 
+                # 等待所有任务完成
                 await asyncio.gather(*tasks)
         except KeyboardInterrupt:
+            # 捕获用户手动中断信号（Ctrl+C）
             print("KeyboardInterrupt")
+            # 关闭爬虫，取消所有任务并关闭各个组件
             await self.close()
 
     async def run(self, many: int = 0):

@@ -7,4 +7,5 @@ tests/
 /build/
 /webants.egg-info/
 /dist/
+.venv
 
