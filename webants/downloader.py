@@ -1,193 +1,204 @@
-"""Downloader
+"""Downloader Module
+This module provides downloading functionality with the following features:
+- Asynchronous HTTP/HTTPS requests handling
+- Local file system access
+- Priority queue based request scheduling
+- Concurrent download management
+- Automatic retry mechanism
 
-    Downloader从request_queue队列中获取request，进行获取，并根据获取的结果类型放入相应的队列中：
+Downloader从request_queue队列中获取request，进行获取，并根据获取的结果类型放入相应的队列中：
 
-    response类型，放入response_queue队列中；
+response类型，放入response_queue队列中；
 
-    request类型，重新放入request队列中，等待再次重试获取；
+request类型，重新放入request队列中，等待再次重试获取；
 
 """
+
 import asyncio
 import logging
-import queue
 from abc import abstractmethod
 from inspect import iscoroutinefunction
-from pathlib import Path
-from typing import Union
+from typing import Optional, Union
 
-import aiohttp
+import httpx
 
-from webants.libs.request import Request
-from webants.libs.response import Response, get_encoding
+from webants.libs import Request, Response
 from webants.utils.logger import get_logger
 
 
 class BaseDownloader:
-    """base class of Downloader"""
+    """Base class for all downloaders.
+
+    Provides the basic interface and common functionality for downloading resources.
+    All concrete downloaders should inherit from this class.
+    """
 
     download_count: int = 0
 
     def __init__(
         self,
-        request_queue: asyncio.PriorityQueue,
-        response_queue: queue.Queue | asyncio.Queue = None,
-        **kwargs,
-    ):
-        self.request_queue = request_queue
-        self.response_queue = response_queue
+        request_queue: Optional[asyncio.PriorityQueue] = None,
+        response_queue: Optional[asyncio.Queue] = None,
+    ) -> None:
+        """Initialize the base downloader.
 
-    async def _next_request(self) -> Request | None:
-        if isinstance(self.request_queue, asyncio.PriorityQueue):
-            priority, request = await self.request_queue.get()
-        else:
-            request = await self.request_queue.get()
+        Args:
+            request_queue: Queue for incoming requests
+            response_queue: Queue for outgoing responses
+        """
+        if request_queue is not None:
+            assert isinstance(request_queue, asyncio.PriorityQueue), (
+                f"request_queue must be asyncio.PriorityQueue, not {type(request_queue)}"
+            )
+        if response_queue is not None:
+            assert isinstance(response_queue, asyncio.Queue), (
+                f"response_queue must be asyncio.Queue, not {type(response_queue)}"
+            )
+        self.request_queue = request_queue or asyncio.PriorityQueue()
+        self.response_queue = response_queue or asyncio.Queue()
 
-        return request
+    async def _next_request(self) -> Request:
+        """Get the next request from the queue.
+
+        Returns:
+            The next Request object
+        """
+        item = await self.request_queue.get()
+
+        return item[1]
 
     @abstractmethod
-    async def fetch(self, *args, **kwargs) -> Union[Response, Request, None]:
+    async def fetch(self, *args, **kwargs) -> Union[httpx.Response, Request, None]:
+        """Abstract method to fetch resources."""
         pass
 
     @abstractmethod
     async def start_worker(self, *args, **kwargs) -> None:
-        """Process queue items forever."""
+        """Abstract method to start worker process."""
         pass
 
     @abstractmethod
     async def start_downloader(self, *args, **kwargs) -> None:
-        """Run the worker until all finished."""
+        """Abstract method to start downloader."""
         pass
 
     @abstractmethod
     async def close(self):
+        """Abstract method to clean up resources."""
         pass
 
 
 class Downloader(BaseDownloader):
-    """Downloader"""
+    """Concrete implementation of downloader using httpx library."""
 
     def __init__(
         self,
-        request_queue: asyncio.PriorityQueue,
-        response_queue: queue.Queue | asyncio.Queue = None,
+        request_queue: Optional[asyncio.PriorityQueue] = None,
+        response_queue: Optional[asyncio.Queue] = None,
         *,
         log_level: int = logging.INFO,
         concurrency: int = 10,
         loop: asyncio.AbstractEventLoop | None = None,
         **kwargs,
     ):
-        """
+        """Initialize the downloader.
 
-        :param request_queue:
-        :param response_queue
-        :param log_level:
-        :param concurrency: asyncio.Semaphore,控制并行下载的连接数
-        :param loop:
-        :param kwargs
+        Args:
+            request_queue: Priority queue for requests
+            response_queue: Queue for responses
+            log_level: Logging level
+            concurrency: Maximum number of concurrent downloads
+            loop: Event loop to use
+            **kwargs: Additional configuration parameters
         """
-        super(Downloader, self).__init__(
-            request_queue=request_queue, response_queue=response_queue
-        )
+        super().__init__(request_queue=request_queue, response_queue=response_queue)
         self.logger = get_logger(self.__class__.__name__, log_level=log_level)
 
-        if loop:
-            self.loop = loop
-            self._close_loop = False
-        else:
-            try:
-                self.loop = asyncio.get_running_loop()
-            except RuntimeError:
-                self.loop = asyncio.new_event_loop()
-                asyncio.set_event_loop(self.loop)
-                self._close_loop = True
+        # Event loop setup
+        self.loop = self._setup_event_loop(loop)
 
-        self._close_session = False
+        # HTTP client configuration
+        self.headers = self._setup_headers(kwargs.get("headers", {}))
         self.cookies = kwargs.get("cookies", {})
-        self.session = aiohttp.ClientSession(loop=self.loop, cookies=self.cookies)
-        self._close_session = True
+        self.client = self._setup_http_client()
 
-        self.request_queue = request_queue
-        assert isinstance(self.request_queue, asyncio.PriorityQueue)
-        self.response_queue = response_queue
-
+        # Concurrency control
         self.concurrency = concurrency
         self.sem = asyncio.Semaphore(concurrency)
-        self.kwargs = kwargs or {}
+
+        # Additional settings
         self.delay = kwargs.get("delay", 0)
-        self.headers = kwargs.get("headers", {})
-        self.headers.setdefault(
+        self.default_encoding = kwargs.get("encoding", "utf-8")
+        self.kwargs = kwargs
+
+    def _setup_headers(self, headers: dict) -> dict:
+        """Setup default headers with user agent if not provided."""
+        headers.setdefault(
             "User-Agent",
             "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:106.0) Gecko/20100101 Firefox/116.0",
         )
-        # self.cookies = kwargs.get("cookies", {})
-        self.default_encoding = kwargs.get("encoding", "utf-8")
+        return headers
 
-    async def _fetch(self, request: Request) -> Union[Response, Exception, None]:
+    def _setup_http_client(self) -> httpx.AsyncClient:
+        """Create and configure httpx client."""
+        return httpx.AsyncClient(
+            headers=self.headers,
+            cookies=self.cookies,
+            http2=False,
+        )
+
+    def _setup_event_loop(
+        self, loop: Optional[asyncio.AbstractEventLoop]
+    ) -> asyncio.AbstractEventLoop:
+        """Setup and return event loop."""
+        if loop:
+            self._close_loop = False
+            return loop
+
+        try:
+            loop = asyncio.get_running_loop()
+            self._close_loop = False
+        except RuntimeError:
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
+            self._close_loop = True
+        return loop
+
+    async def _fetch(self, request: Request) -> Union[httpx.Response, Exception, None]:
         delay = request.delay or self.delay
         self.logger.debug(f"Fetching {request}, delay<{delay}>")
         await asyncio.sleep(delay)
 
         # if not request.headers:
-        request.headers = self.headers or request.headers
+        headers = request.headers or self.headers
 
-        self.logger.debug(f"request headers: {request.headers}")
+        self.logger.debug(f"request headers: {headers}")
 
         try:
-            async with self.session.request(
+            # 发送请求，并包装成Response
+            # httpx.AsyncClient.request()方法会自动处理重定向和cookies
+            resp = await self.client.request(
                 method=request.method,
                 url=request.url,
-                headers=request.headers,
+                headers=headers,
                 timeout=request.timeout,
-                cookies=self.cookies,
-            ) as r:
-                resp = await Response.build(r, request)
+            )
+            return resp
 
-                self.logger.debug(resp)
-                self.download_count += 1
-                return resp
-        except asyncio.TimeoutError:
+        except httpx.TimeoutException as e:
             self.logger.error(
                 f"Timeout, retries {request}<{request.retries}> again later."
             )
-            # return request
-            return Exception("asyncio.TimeoutError")
-        except aiohttp.ClientError:
+            return e
+        except httpx.RequestError as e:
             self.logger.error(
-                f"ClientError, retries {request}<{request.retries}> again later."
+                f"RequestError, retries {request}<{request.retries}> again later."
             )
-            return Exception("aiohttp.ClientError")
+            return e
 
-    async def _fetch_local(self, request: Request) -> Union[Response, None]:
-        self.logger.debug(f"Fetching {request}, delay<{0.0}>")
-        await asyncio.sleep(0.0)
-        p = Path(request.url.removeprefix("file:///"))
-        if not p.is_file():
-            self.logger.error(f"'{p}' is not a file.")
-
-        try:
-            # 读取本地文件，并包装成Response
-            content = p.read_bytes()
-            resp = Response(
-                "GET",
-                str(request.url),
-                status_code=200,
-                reason="su",
-                request=request,
-                http_version=None,
-                headers=None,
-                cookies=None,
-                body=content,
-                encoding=get_encoding(content=content),
-                history=None,
-            )
-            self.logger.debug(resp)
-            self.download_count += 1
-            return resp
-        except OSError as e:
-            self.logger.error(f"OSError: {e}")
-            return None
-
-    async def _retry(self, request: Request, exception: Exception) -> Response | None:
+    async def _retry(
+        self, request: Request, exception: Exception
+    ) -> Optional[httpx.Response]:
         request.retries -= 1
         # request.priority += 10
 
@@ -197,24 +208,20 @@ class Downloader(BaseDownloader):
         if request.retries > 0:
             return await self.fetch(request)
         else:
-            return Response(
-                request.method.upper(),
-                str(request.url),
+            return httpx.Response(
                 status_code=600,
-                reason=str(exception),
-                request=request,
-                http_version=None,
-                headers=None,
-                cookies=None,
-                body=bytes(str(exception), encoding=self.default_encoding),
-                encoding=self.default_encoding,
-                history=None,
+                request=httpx.Request(request.method, request.url),
+                # body=bytes(str(exception), encoding=self.default_encoding),
             )
 
-    async def fetch(self, request: Request) -> Union[Response, None]:
-        """
-        信号量会管理一个内部计数器，该计数器会随每次 acquire() 调用递减并随每次 release() 调用递增。
-        计数器的值永远不会降到零以下；当 acquire() 发现其值为零时，它将保持阻塞直到有某个任务调用了 release()。
+    async def fetch(self, request: Request) -> Optional[httpx.Response]:
+        """Fetch a resource based on the request.
+
+        Args:
+            request: Request object containing URL and other parameters
+
+        Returns:
+            Response object or None if request fails
         """
 
         try:
@@ -228,7 +235,7 @@ class Downloader(BaseDownloader):
             self.logger.error(f"<Error: {request.url} {e}>")
             return None
 
-        if isinstance(result, Response):
+        if isinstance(result, httpx.Response):
             if request.callback is None:
                 return result
             if iscoroutinefunction(request.callback):
@@ -280,21 +287,24 @@ class Downloader(BaseDownloader):
         self.logger.debug(f"{self.__class__.__name__} already stopped.")
 
     async def close(self) -> None:
-        if self._close_session:
-            await asyncio.gather(self.session.close())
-            self._close_session = False
+        await self.client.aclose()
 
-            # if self._close_loop:
-            #     self.loop.run_until_complete(self.session.close())
-            #     self.loop.close()
-
-            self.logger.info(f"{self.__class__.__name__} has been closed.")
+        self.logger.info(f"{self.__class__.__name__} has been closed.")
 
 
 if __name__ == "__main__":
 
     async def main():
         pd = Downloader(asyncio.PriorityQueue())
+        resp = await pd.fetch(
+            Request(
+                "http://www.google.com"
+            )
+        )
+        print(resp)
+        print(resp.request.headers)
+        print(resp.text)
+        # print(resp.json)
         await pd.close()
 
     asyncio.run(main())

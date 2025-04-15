@@ -2,7 +2,7 @@ import asyncio
 from typing import Iterable, Callable
 
 from webants.libs import Request
-from webants.utils import get_logger
+from webants.utils.logger import get_logger
 
 
 class Handler:

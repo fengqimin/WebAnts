@@ -10,7 +10,9 @@ import asyncio
 import time
 from typing import Iterable
 
-from webants.libs import Response, Link, Request, Result, Field
+from httpx import Response
+
+from webants.libs import Link, Request, Result, Field
 from webants.libs.item import Item, ItemDescriptor
 from webants.utils import get_logger
 

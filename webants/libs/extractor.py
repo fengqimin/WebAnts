@@ -48,7 +48,7 @@ class Link:
 
     def __init__(self, url: str, unique: bool = True):
         self.url = url
-        # url是否唯一，如果为True，调度器进行去重操作
+        # url是否必须唯一，如果为True，调度器进行去重操作
         self.unique = unique
 
     def __repr__(self):
@@ -61,26 +61,29 @@ class Link:
 def iter_elements(
     html: etree._Element,
     *,
-    tags: Sequence[str] | str = None,
+    tags: Sequence[str] | str,
     attr: str = None,
 ) -> list[etree.ElementBase]:
-    """根据tags和attr，迭代所有符合要求的元素
-
-    :param html:
-    :param tags:
-    :param attr:
-    :return:
     """
+    根据 tags 和 attr，迭代所有符合要求的元素
 
+    :param html: 待处理的 HTML 元素
+    :param tags: 要匹配的标签名，可以是单个标签名或标签名列表
+    :param attr: 要匹配的属性名，如果为 None，则不进行属性匹配
+    :return: 符合要求的元素列表
+    """
+    # 如果 tags 不是列表或元组类型，则将其转换为包含单个元素的列表
     if not isinstance(tags, (list, tuple)):
         assert isinstance(tags, str)
         tags = [tags]
-
+    # 遍历 HTML 元素中所有匹配 tags 的元素
     for tag in html.iter(*tags):
+        # 如果 attr 为 None，则直接返回该元素
         if attr is None:
             yield tag
+        # 否则，检查该元素是否包含指定的属性
         else:
-            if attr in tag.attrib.keys():
+            if attr in tag.attrib:
                 yield tag
 
 
@@ -92,36 +95,40 @@ def find_elements(
     tags: Sequence[str] | str = None,
     attr: str = None,
 ) -> list[etree.ElementBase]:
-    """查找所有符合要求的元素，返回元素列表
-
-    :param html:
-    :param selector:
-    :param xpath:
-    :param tags:
-    :param attr:
-
-    :return:
     """
+    查找所有符合要求的元素，返回元素列表
+
+    :param html: 可以是 HTML 字符串或者 etree._Element 对象，用于指定待查找的 HTML 内容
+    :param selector: CSS 选择器，用于通过 CSS 选择器来查找元素，默认为 None
+    :param xpath: XPath 表达式，用于通过 XPath 来查找元素，默认为 None
+    :param tags: 元素标签名，可以是单个标签名或标签名列表，默认为 None
+    :param attr: 元素属性名，用于筛选包含指定属性的元素，默认为 None
+    :return: 符合要求的元素列表
+    """
+    # 检查 html 是否为 str 或 etree.ElementBase.__base__ 类型
     assert isinstance(
         html, (str, etree.ElementBase.__base__)
     ), f"Expected 'str' or 'etree._Element', got '{html.__class__.__name__}'"
 
+    # 如果 html 是字符串类型，将其转换为 etree._Element 对象
     if isinstance(html, str):
         html = etree.HTML(html)
-    # list of tag, attr
+    # 将 tags 参数转换为列表形式
     tags = args_to_list(tags)
-    # 更新实例属性
 
+    # 如果提供了 CSS 选择器，使用它来查找元素
     if selector:
         return html.cssselect(selector)
+    # 如果提供了 XPath 表达式，使用它来查找元素
     elif xpath:
         return html.xpath(xpath)
+    # 如果没有提供选择器和 XPath，使用 iter_elements 函数根据标签和属性查找元素
     else:
-        return iter_elements(
+        return list(iter_elements(
             html,
             tags=tags,
             attr=attr,
-        )
+        ))
 
 
 def extract_attrib(
@@ -192,9 +199,11 @@ def extract_links(
         attr=attr,
     ):
         if link := Link(
-            url=urljoin(base_url, element.attrib.get(attr))
-            if base_url
-            else element.attrib.get(attr),
+            url=(
+                urljoin(base_url, element.attrib.get(attr))
+                if base_url
+                else element.attrib.get(attr)
+            ),
             unique=unique,
         ):
             results.append(link)

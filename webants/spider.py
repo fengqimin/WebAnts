@@ -3,14 +3,17 @@
 update：
     2022-11-06, 调用Parser组件实现解析
 """
+
 import asyncio
 import time
 from abc import abstractmethod
 from pathlib import Path
 from urllib.parse import urlparse, unquote_plus
 
+from httpx import Response
+
 from webants.downloader import Downloader, BaseDownloader
-from webants.libs import Request, Result, InvalidParser, Response
+from webants.libs import Request, Result, InvalidParser
 from webants.parser import Parser
 from webants.scheduler import Scheduler
 from webants.utils import get_logger, args_to_list

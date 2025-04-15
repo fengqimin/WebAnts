@@ -10,7 +10,7 @@ from webants.libs import (
     FilteringLinkExtractor,
     ElementExtractor,
 )
-from webants.utils import get_logger
+from webants.utils.logger import get_logger
 
 mod_logger = get_logger("Item", log_level=20)
 
