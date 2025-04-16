@@ -27,12 +27,16 @@ REGEX_TITLE = re.compile(r'<title.*?>(.+)<.*?/title>', flags=re.I)
 
 
 def get_url_path(url: str, base_url: str = None) -> str:
-    """
-    如果url中包含base_url，则返回url中的路径，否则返回整个url
-    用途主要是为了对存在多个域名的网站进行处理
-    :param url:
-    :param base_url:
-    :return:
+    """Get the path part from the URL
+    If the URL contains base_url, return the path part of the URL, otherwise return the entire URL.
+    This is mainly used to process websites with multiple domains.
+    
+    Args:
+        url: URL to process
+        base_url: Base URL for comparison
+    
+    Returns:
+        Path part of URL or full URL
     """
     if base_url in url:
         return urlparse(url).path
@@ -41,12 +45,17 @@ def get_url_path(url: str, base_url: str = None) -> str:
 
 
 def lenient_host(host: str) -> str:
-    """将host松散化
-
+    """Normalize host name for lenient comparison
+        
+    Examples:
         www.baidu.com -> baiducom
         108.170.5.99 -> 108.170.5.99
-    :param host:
-    :return:
+        
+    Args:
+        host: Host name to normalize
+        
+    Returns:
+        Normalized host name
     """
     if re.match(r'^[\d.]+$', host):
         return host
@@ -62,26 +71,35 @@ def normalize_url(url: str,
                   keep_default_port: bool = False,
                   sort_query: bool = True,
                   ) -> str:
-    """规范化url
-
-        默认情况下，去除认证信息， 去除片段，去除默认端口，保留查询空值，排序查询；
-    :param url:
-    :param keep_auth: 是否保留认证信息， 默认为False
-    :param keep_fragments: 是否保留fragment，默认为False
-    :param keep_blank_values: 是否保留查询空值， 默认为True
-    :param keep_default_port: 是否保留默认端口， 默认为False
-    :param sort_query: 是否排序查询， 默认为True
-    :return:
+    """Normalize URL by applying standard rules
+    
+    By default:
+    - Removes authentication info
+    - Removes fragments 
+    - Removes default ports
+    - Preserves empty query values
+    - Sorts query parameters
+    
+    Args:
+        url: URL to normalize
+        keep_auth: Whether to keep authentication info (default False)
+        keep_fragments: Whether to keep URL fragments (default False)
+        keep_blank_values: Whether to keep empty query values (default True)
+        keep_default_port: Whether to keep default ports (default False)
+        sort_query: Whether to sort query parameters (default True)
+        
+    Returns:
+        Normalized URL
     """
     (scheme, netloc, path, params, query, fragment) = urlparse(url)
-    # 处理查询空值
+    # Handle empty query values
     qsl = parse_qsl(query, keep_blank_values)
-    # 排序查询
+    # Sort query params
     if sort_query:
         query = urlencode(sorted(qsl))
-    # 处理fragment
+    # Handle fragments
     fragment = fragment if keep_fragments else ''
-    # 去除默认端口，如果keep_default_port=False
+    # Remove default ports if keep_default_port=False
     if not keep_default_port:
         if scheme == 'http':
             netloc = netloc.removesuffix(':80')
@@ -106,18 +124,21 @@ def url_fingerprint_byte(url: str,
                          keep_fragments: bool = False,
                          sort_query: bool = True,
                          new_host: str = None) -> bytes:
-    """url normalize and hash
+    """URL normalize and hash
 
-        :param url:
-        :param method:
-        :param algorithm_name:
-        :param keep_auth:
-        :param sort_query:
-        :param keep_blank_values:
-        :param keep_fragments:
-        :param keep_default_port:
-        :param new_host:
+    Args:
+        url: URL to normalize and hash
+        method: HTTP method to use
+        algorithm_name: Hash algorithm to use
+        keep_auth: Whether to keep auth info 
+        keep_blank_values: Whether to keep blank query values
+        keep_fragments: Whether to keep URL fragments
+        keep_default_port: Whether to keep default ports
+        sort_query: Whether to sort query parameters
+        new_host: Optional new host to replace in URL
 
+    Returns:
+        Bytes containing URL hash
     """
     if new_host:
         url = url_with_host(url, new_host)
@@ -145,18 +166,21 @@ def url_fingerprint(url: str,
                     keep_fragments: bool = False,
                     sort_query: bool = True,
                     new_host: str = None) -> str:
-    """url normalize and hash   
+    """URL normalize and hash
+    
+    Args: 
+        url: URL to normalize and hash
+        method: HTTP method to use
+        algorithm_name: Hash algorithm to use
+        keep_auth: Whether to keep auth info
+        sort_query: Whether to sort query params
+        keep_blank_values: Whether to keep blank values
+        keep_fragments: Whether to keep fragments
+        keep_default_port: Whether to keep default ports
+        new_host: Optional new host to replace
 
-        :param url:
-        :param method:
-        :param algorithm_name:
-        :param keep_auth:
-        :param sort_query:
-        :param keep_blank_values:
-        :param keep_fragments:
-        :param keep_default_port:
-        :param new_host: 
-
+    Returns:
+        String containing URL hash
     """
     if new_host:
         url = url_with_host(url, new_host)
@@ -185,18 +209,21 @@ def url_fp_to_filename(url,
                        new_host: str = None,
                        suffix: str = None,
                        ) -> str:
-    """利用url的指纹命名文件名
+    """Generate filename using URL fingerprint
 
-    :param url:
-    :param algorithm_name:
-    :param keep_auth:
-    :param sort_query:
-    :param keep_blank_values:
-    :param keep_fragments:
-    :param keep_default_port:
-    :param new_host:
-    :param suffix
-    :return:
+    Args:
+        url: URL to process
+        algorithm_name: Hash algorithm name (default 'sha1')
+        keep_auth: Whether to keep authentication info (default False)
+        sort_query: Whether to sort query parameters (default True)
+        keep_blank_values: Whether to keep empty query values (default True)
+        keep_fragments: Whether to keep URL fragments (default False)
+        keep_default_port: Whether to keep default ports (default False)
+        new_host: New host to replace in URL
+        suffix: File suffix (default 'html')
+    
+    Returns:
+        Filename generated from URL fingerprint
     """
     _hash = url_fingerprint(url=url_with_host(url, new_host),
                             algorithm_name=algorithm_name,
@@ -211,10 +238,13 @@ def url_fp_to_filename(url,
 
 
 def url_to_path(url: str) -> str:
-    """将URL表示为路径 。
+    """Convert URL to path string
 
-    :param url:
-    :return: 路径字符串
+    Args:
+        url: URL to convert
+    
+    Returns:
+        Path string
     """
     parts = urlparse(url)
     assert parts.scheme in (
@@ -224,6 +254,16 @@ def url_to_path(url: str) -> str:
 
 
 def url_with_host(url: str, new_host: str = None, key: Sequence = None) -> str:
+    """Replace host in URL with new host
+
+    Args:
+        url: Original URL
+        new_host: New host to replace
+        key: Sequence of keys for conditional replacement
+    
+    Returns:
+        URL with replaced host
+    """
     if new_host is None:
         return url
 

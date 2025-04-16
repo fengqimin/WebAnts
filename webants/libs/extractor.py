@@ -1,7 +1,7 @@
 import re
 from abc import abstractmethod
 from collections.abc import Sequence
-from typing import TypeVar, Any, Type, Callable
+from typing import Generator, TypeVar, Any, Type, Callable
 from urllib.parse import urlparse, urljoin
 
 from lxml import etree
@@ -14,17 +14,17 @@ from webants.utils.url import lenient_host, normalize_url
 
 __all__ = [
     "Link",
-    # 函数
+    # Functions
     "iter_elements",
-    "find_elements",
+    "find_elements", 
     "extract_attrib",
     "extract_links",
     "extract_and_filter_links",
     "extract_text",
     "get_base_url",
     "get_html_title",
-    "ExtractorFactory",  # Extractor工厂类
-    "BaseExtractor",  # Extractor 基类
+    "ExtractorFactory",  # Extractor factory class
+    "BaseExtractor",  # Base Extractor class
     #
     "AttribExtractor",
     "LinkExtractor",
@@ -41,14 +41,14 @@ _ET = TypeVar(
 class Link:
     """Link class
 
-    保存提取出的URL
+    Stores extracted URLs
     """
 
     __slots__ = ("url", "unique")
 
     def __init__(self, url: str, unique: bool = True):
         self.url = url
-        # url是否必须唯一，如果为True，调度器进行去重操作
+        # Whether URL must be unique, if True scheduler will deduplicate
         self.unique = unique
 
     def __repr__(self):
@@ -63,25 +63,27 @@ def iter_elements(
     *,
     tags: Sequence[str] | str,
     attr: str = None,
-) -> list[etree.ElementBase]:
+) -> Generator[etree.ElementBase, None, None]:
+    """Iterate through all elements matching tags and attr
+    
+    Args:
+        html: HTML element to process
+        tags: Tag names to match, can be single tag name or list of tag names
+        attr: Attribute name to match, if None no attribute matching is done
+        
+    Returns:
+        List of matching elements
     """
-    根据 tags 和 attr，迭代所有符合要求的元素
-
-    :param html: 待处理的 HTML 元素
-    :param tags: 要匹配的标签名，可以是单个标签名或标签名列表
-    :param attr: 要匹配的属性名，如果为 None，则不进行属性匹配
-    :return: 符合要求的元素列表
-    """
-    # 如果 tags 不是列表或元组类型，则将其转换为包含单个元素的列表
+    # If tags is not a list or tuple, convert it to a single-element list
     if not isinstance(tags, (list, tuple)):
         assert isinstance(tags, str)
         tags = [tags]
-    # 遍历 HTML 元素中所有匹配 tags 的元素
+    # Iterate through all elements in HTML matching tags
     for tag in html.iter(*tags):
-        # 如果 attr 为 None，则直接返回该元素
+        # If attr is None, return element directly
         if attr is None:
             yield tag
-        # 否则，检查该元素是否包含指定的属性
+        # Otherwise, check if element has specified attribute
         else:
             if attr in tag.attrib:
                 yield tag
@@ -96,33 +98,36 @@ def find_elements(
     attr: str = None,
 ) -> list[etree.ElementBase]:
     """
-    查找所有符合要求的元素，返回元素列表
+    Find all elements matching the criteria, return a list of elements
 
-    :param html: 可以是 HTML 字符串或者 etree._Element 对象，用于指定待查找的 HTML 内容
-    :param selector: CSS 选择器，用于通过 CSS 选择器来查找元素，默认为 None
-    :param xpath: XPath 表达式，用于通过 XPath 来查找元素，默认为 None
-    :param tags: 元素标签名，可以是单个标签名或标签名列表，默认为 None
-    :param attr: 元素属性名，用于筛选包含指定属性的元素，默认为 None
-    :return: 符合要求的元素列表
+    Args:
+        html: HTML content to search, can be a string or etree._Element object
+        selector: CSS selector to find elements, default is None
+        xpath: XPath expression to find elements, default is None
+        tags: Element tag names, can be single tag name or list of tag names, default is None
+        attr: Element attribute name to filter elements containing the specified attribute, default is None
+
+    Returns:
+        List of matching elements
     """
-    # 检查 html 是否为 str 或 etree.ElementBase.__base__ 类型
+    # Check if html is of type str or etree.ElementBase.__base__
     assert isinstance(
         html, (str, etree.ElementBase.__base__)
     ), f"Expected 'str' or 'etree._Element', got '{html.__class__.__name__}'"
 
-    # 如果 html 是字符串类型，将其转换为 etree._Element 对象
+    # If html is a string, convert it to etree._Element object
     if isinstance(html, str):
         html = etree.HTML(html)
-    # 将 tags 参数转换为列表形式
+    # Convert tags parameter to list form
     tags = args_to_list(tags)
 
-    # 如果提供了 CSS 选择器，使用它来查找元素
+    # If CSS selector is provided, use it to find elements
     if selector:
         return html.cssselect(selector)
-    # 如果提供了 XPath 表达式，使用它来查找元素
+    # If XPath expression is provided, use it to find elements
     elif xpath:
         return html.xpath(xpath)
-    # 如果没有提供选择器和 XPath，使用 iter_elements 函数根据标签和属性查找元素
+    # If neither selector nor XPath is provided, use iter_elements function to find elements based on tags and attributes
     else:
         return list(iter_elements(
             html,
@@ -139,14 +144,17 @@ def extract_attrib(
     xpath: str = None,
     tags: Sequence[str] | str = None,
 ) -> list[Any]:
-    """查找所有符合要求的元素属性，返回属性值列表
+    """Find all elements matching the criteria and extract their attributes, return a list of attribute values
 
-    :param html:
-    :param tags:
-    :param attr:
-    :param selector:
-    :param xpath:
-    :return: dict
+    Args:
+        html: HTML content to search
+        tags: Element tag names
+        attr: Attribute name to extract
+        selector: CSS selector
+        xpath: XPath expression
+
+    Returns:
+        List of attribute values
     """
 
     results = []
@@ -173,16 +181,19 @@ def extract_links(
     base_url: str = None,
     unique: bool = True,
 ) -> list[Link]:
-    """查找所有符合要求的URL，返回Link列表
+    """Find all matching URLs and return a list of Link objects
 
-    :param html:
-    :param tags:
-    :param attr: 默认为href，可以根据URL所对应的属性进行调整
-    :param selector:
-    :param xpath:
-    :param base_url:
-    :param unique: url是否唯一
-    :return:
+    Args:
+        html: HTML content
+        tags: Element tag names
+        attr: Default is href, can be adjusted based on the attribute corresponding to the URL
+        selector: CSS selector
+        xpath: XPath expression
+        base_url: Base URL for resolving relative URLs
+        unique: Whether URLs should be unique
+
+    Returns:
+        List of Link objects
     """
     if base_url:
         assert isinstance(
@@ -355,15 +366,18 @@ def extract_text(
     attr: str = None,
     iter_text: bool = True,
 ) -> list[str]:
-    """查找所有符合要求的文本，返回文本列表
+    """Find all matching text and return a list of text values
 
-    :param html:
-    :param selector:
-    :param xpath:
-    :param tags:
-    :param attr:
-    :param iter_text:
-    :return:
+    Args:
+        html: HTML content
+        selector: CSS selector
+        xpath: XPath expression
+        tags: Element tag names
+        attr: Element attribute name
+        iter_text: Whether to iterate through text, default is True
+
+    Returns:
+        List of text values
     """
 
     results = []
@@ -403,7 +417,7 @@ class ExtractorFactory:
     """Extractor factory class"""
 
     __slots__ = ()
-    extractors: dict[str, _ET] = dict()  # 通过元类记录具体类
+    extractors: dict[str, _ET] = dict()  # Record specific classes through metaclass
     _instance = None
 
     def __new__(cls, *args, **kwargs):
@@ -428,14 +442,16 @@ class ExtractorFactory:
 class _ExtractorMeta(type):
     """Extractor metaclass
 
-    通过调用工厂类(Extractor)的注册方法，将整个类对象{按类名：类对象}存储在字典里面，
-    工厂方法按类名获取到类对象，弥补需手动修改代码的缺点
+    By calling the registration method of the factory class (Extractor), 
+    store the entire class object {by class name: class object} in a dictionary.
+    The factory method retrieves the class object by class name, 
+    eliminating the need for manual code modification.
     """
 
     def __new__(mcs, name: str, bases: tuple, attrs: dict):
         cls = super().__new__(mcs, name, bases, attrs)
 
-        #  使用元类，自动注册具体产品类
+        # Use metaclass to automatically register specific product classes
         if not name.startswith("_"):
             ExtractorFactory.register(name, cls)
         return cls
@@ -467,8 +483,8 @@ class BaseExtractor(metaclass=_ExtractorMeta):
 class _LxmlElementExtractor(BaseExtractor):
     """LxmlElementExtractor base class
 
-    利用lxml库，从xml, html文档中提取特定(css, xpath or tags (and attrs) )的元素(Element)和内容（content）
-    提取顺序为：css, xpath, tags
+    Use lxml library to extract specific elements (Element) and content from xml, html documents 
+    based on css, xpath or tags (and attrs). Extraction order: css, xpath, tags.
     """
 
     __slots__ = (
@@ -493,11 +509,11 @@ class _LxmlElementExtractor(BaseExtractor):
     ):
         """
 
-        :param selector: CSS 选择器
-        :param xpath: XPath路径表达式
-        :param tags: 元素标签序列
-        :param attr: 元素属性
-        :param many: 是否提取全部，默认为True，为False是只提取第一个
+        :param selector: CSS selector
+        :param xpath: XPath expression
+        :param tags: Element tag sequence
+        :param attr: Element attribute
+        :param many: Whether to extract all, default is True. If False, only the first one is extracted.
         :param kwargs:
         """
         super(_LxmlElementExtractor, self).__init__()
@@ -523,7 +539,7 @@ class _LxmlElementExtractor(BaseExtractor):
 
     @abstractmethod
     def _extract_element(self, element: etree.ElementBase) -> Any:
-        """从单个元素提取信息，并返回结果
+        """Extract information from a single element and return the result
 
         :param element:
         :return:
@@ -531,7 +547,7 @@ class _LxmlElementExtractor(BaseExtractor):
         pass
 
     def _find_elements(self, html: etree._Element) -> list[etree.ElementBase]:
-        """查找到符合要求的所有元素
+        """Find all elements matching the criteria
 
         :param html:
         :return:
@@ -600,7 +616,7 @@ class _LxmlElementExtractor(BaseExtractor):
 class AttribExtractor(_LxmlElementExtractor):
     """attribute Extractor class
 
-    从xml, html文档中提取特定元素的特定属性值
+    Extract specific attribute values from specific elements in xml, html documents
     """
 
     __slots__ = ("selector", "xpath", "tags", "attr")
@@ -642,8 +658,8 @@ class AttribExtractor(_LxmlElementExtractor):
 class LinkExtractor(AttribExtractor):
     """Link Extractor class
 
-    从xml, html文档中提取超链接（hyperlink）
-    默认提取所有<a> [href] 属性
+    Extract hyperlinks from xml, html documents
+    Default extracts all <a> [href] attributes
     """
 
     __slots__ = "base_url", "unique"
@@ -691,7 +707,7 @@ class LinkExtractor(AttribExtractor):
 class ElementExtractor(_LxmlElementExtractor):
     """Element Extractor class
 
-    如果 css selector, xpath, tags, attr同时为None，则遍历xml， html中的所有元素
+    If css selector, xpath, tags, attr are all None, iterate through all elements in xml, html
     """
 
     __slots__ = ("selector", "xpath", "tags", "attr")
@@ -703,7 +719,7 @@ class ElementExtractor(_LxmlElementExtractor):
 class TextExtractor(_LxmlElementExtractor):
     """Text Extractor class
 
-    从xml, html文档中提取元素中的文本(Text)
+    Extract text from elements in xml, html documents
     """
 
     __slots__ = ("selector", "xpath", "tags", "attr", "iter_text")
@@ -742,7 +758,7 @@ class TextExtractor(_LxmlElementExtractor):
 class FilteringLinkExtractor(BaseExtractor):
     """FilteringExtractor class
 
-    从html页面中提取特定的元素，并进行过滤
+    Extract specific elements from html pages and filter them
     """
 
     def __init__(

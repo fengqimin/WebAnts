@@ -24,8 +24,14 @@ def args_to_list(args: Any) -> list:
 
 
 def copy_object(obj: object, *args, **kwargs):
-    """返回对象的拷贝，其中kwargs中给定的值将变化
-        如果kwargs中设定了cls，将实现类转换
+    """Return a copy of the object with values changed according to kwargs.
+    If 'cls' is specified in kwargs, it will implement class conversion.
+
+    Args:
+        obj: Object to copy
+        *args: Positional arguments
+        **kwargs: Keyword arguments that will override object attributes. 
+                 Special 'cls' parameter can be used to change the class.
     """
     if not hasattr(obj, '__dict__'):
         return obj

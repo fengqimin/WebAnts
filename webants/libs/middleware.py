@@ -1,6 +1,6 @@
-"""MiddleWare
+"""Middleware
 
-使用Chain of Responsibility模式
+Using Chain of Responsibility pattern
 """
 
 from abc import abstractmethod

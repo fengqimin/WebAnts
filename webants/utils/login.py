@@ -46,14 +46,14 @@ async def async_login_with_playwright(
         await page.locator('input[name="cookietime"]').check()
         # Click button:has-text("登錄")
         await page.locator(css_login_button).click()
-        # 延时，否则很可能无法获取全部的cookie
+        # Add delay, otherwise cookies may not be fully obtained
         time.sleep(5)
         await page.wait_for_url(login_url)
 
         resp = await page.goto("http://108.170.5.99/thread-8096355-1-1.html", timeout=0)
 
         headers = await resp.request.all_headers()
-        # 保存登录后的cookie
+        # Save cookies after login
         if isinstance(data_path, str):
             data_path = Path(data_path)
         elif data_path is None:
@@ -140,7 +140,7 @@ def sync_login_with_playwright(
         # print(resp.all_headers())
         headers = resp.request.all_headers()
 
-        # 保存登录后 stage and cookie
+        # Save login stage and cookies
         if isinstance(data_path, str):
             data_path = Path(data_path)
         elif data_path is None:

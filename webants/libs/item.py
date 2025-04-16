@@ -30,23 +30,26 @@ __all__ = [
 
 
 class ExtractorDescriptor:
-    """描述器类
+    """Descriptor class
 
-    托管对Extractor实例数据的访问，直接返回extract结果。
+    Manages access to Extractor instance data, directly returns extract results.
     https://docs.python.org/zh-cn/3.10/howto/descriptor.html
 
-    描述器仅在用作类变量时起作用。放入实例时，它们将失效。
+    Descriptors only work when used as class variables. They become ineffective when put into instances.
     """
 
     def __set_name__(self, owner, name):
         self._name = "_" + name
 
     def __get__(self, instance, owner):
-        """
+        """Get the extraction result
 
-        :param instance:
-        :param owner:
-        :return:
+        Args:
+            instance: The instance
+            owner: The owner class
+            
+        Returns:
+            The extraction result
         """
         extractor = getattr(instance, self._name)
         mod_logger.debug(f"{type(extractor)}")
@@ -63,10 +66,10 @@ class ExtractorDescriptor:
 class Item:
     """Item base class
 
-    利用Extractor类，获取html中的Item
+    Uses Extractor class to get Items from HTML
     """
 
-    # 数据描述器
+    # Data descriptor
     field = ExtractorDescriptor()
     html: str = ""
 
@@ -170,11 +173,14 @@ class ItemDescriptor:
         self._name = "_" + name
 
     def __get__(self, instance, owner):
-        """
+        """Get the extraction result
 
-        :param instance:
-        :param owner:
-        :return:
+        Args:
+            instance: The instance
+            owner: The owner class
+            
+        Returns:
+            The extraction result
         """
         html = getattr(instance, self._name)
 

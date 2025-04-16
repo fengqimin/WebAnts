@@ -35,6 +35,7 @@
 
  """
 
+from asyncio import iscoroutinefunction
 from typing import Callable, Final
 
 from webants.libs.exceptions import InvalidRequestMethod
@@ -82,19 +83,20 @@ class Request:
         priority: int = 0,
         unique: bool = True,
     ):
-        """
-
-        :param url:目标URL
-        :param method:请求方式，必须在METHOD中
-        :param headers:请求头
-        :param referer:Request 来源地址, 是本网页的 Request
-        :param callback: 回调函数
-        :param cb_kwargs: 回调函数的关键字参数
-        :param delay: 延时时间s
-        :param timeout: 超时时间s
-        :param retries: 重试次数
-        :param priority: 优先级, 越小越高
-        :param unique: 是否唯一，默认为True
+        """Initialize a Request object
+        
+        Args:
+            url: Target URL
+            method: Request method, must be one of METHOD
+            headers: Request headers
+            referer: Request source URL, refers to the Request of the current page
+            callback: Callback function
+            cb_kwargs: Callback function keyword arguments 
+            delay: Delay time in seconds
+            timeout: Request timeout in seconds
+            retries: Number of retries
+            priority: Priority, lower number means higher priority
+            unique: Whether the request should be unique, defaults to True
         """
 
         if not isinstance(url, str):
@@ -104,15 +106,19 @@ class Request:
         self.method: str = method.upper()
 
         if self.method not in self.METHOD:
-            raise InvalidRequestMethod(f"{self.method} method is not supported.")
+            raise InvalidRequestMethod(f"'{self.method}' method is not supported.")
 
         self.headers: dict = headers or DEFAULT_REQUEST_HEADERS
 
         self.referer: Request = referer
-        # 回调函数及参数
+        # Callback function and arguments
         self.callback = callback
+        if self.callback:
+            assert iscoroutinefunction(callback), (
+                f"callback must be a coroutine function, got {callback.__name__}"
+            )     
         self.cb_kwargs = cb_kwargs or {}
-        # requests config
+        # Request configuration
         self.priority = priority
         self.retries = retries
         self.timeout = timeout
@@ -121,16 +127,16 @@ class Request:
         Request.count += 1
 
     def __repr__(self):
-        return f"<Request({self.method} {self.url})[{self.priority}]>"
+        return f"<Request('{self.method}', '{self.url}')[{self.priority}]>"
 
     def __lt__(self, other):
-        """“富比较”方法。
-        x<y 调用 x.__lt__(y)
-        x<=y 调用 x.__le__(y)
-        x==y 调用 x.__eq__(y)
-        x!=y 调用 x.__ne__(y)
-        x>y 调用 x.__gt__(y)
-        x>=y 调用 x.__ge__(y)。
+        """Rich comparison method.
+        x<y calls x.__lt__(y)
+        x<=y calls x.__le__(y)
+        x==y calls x.__eq__(y)
+        x!=y calls x.__ne__(y)
+        x>y calls x.__gt__(y)
+        x>=y calls x.__ge__(y).
         """
         assert isinstance(other, Request)
         return self.url < other.url
@@ -141,7 +147,7 @@ class Request:
 
     def __eq__(self, other):
         assert isinstance(other, Request)
-        return self.url == other.url
+        return self.fingerprint() == other.fingerprint()
 
     def __hash__(self):
         # return self.fingerprint()
@@ -157,21 +163,23 @@ class Request:
         keep_fragments: bool = False,
         sort_query: bool = True,
     ) -> bytes:
-        """利用指定的hash算法，计算request的指纹（哈希值）
+        """Calculate the fingerprint (hash value) of the request using the specified hash algorithm
 
 
-        :param algorithm_name: 哈希算法的名称， 默认使用sha1
-        :param keep_auth: 是否保留认证信息， 默认为False，以确保不因用户的不同导致哈希值不同
-        :param keep_fragments: 是否保留fragment，默认为False，以确保不因fragment的不同导致哈希值不同
-        :param keep_blank_values: 是否保留查询空值， 默认为True
-        :param keep_default_port: 是否保留默认端口， 默认为False
-        :param sort_query: 是否排序查询， 默认为True，以确保不因查询参数的顺序不同导致哈希值不同
+        Args:
+            algorithm_name: Name of the hash algorithm, defaults to sha1
+            keep_auth: Whether to retain authentication information, defaults to False to ensure hash consistency across users
+            keep_fragments: Whether to retain fragments, defaults to False to ensure hash consistency across fragments
+            keep_blank_values: Whether to retain blank query values, defaults to True
+            keep_default_port: Whether to retain the default port, defaults to False
+            sort_query: Whether to sort query parameters, defaults to True to ensure hash consistency across parameter order
 
-        :return:
+        Returns:
+            The fingerprint (hash value) of the request
         """
         import hashlib
 
-        # 开始计算哈希值
+        # Start calculating the hash value
         fp = hashlib.new(algorithm_name, self.method.encode())
 
         url = normalize_url(

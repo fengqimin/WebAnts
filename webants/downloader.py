@@ -4,25 +4,18 @@ This module provides downloading functionality with the following features:
 - Local file system access
 - Priority queue based request scheduling
 - Concurrent download management
-- Automatic retry mechanism
-
-Downloader从request_queue队列中获取request，进行获取，并根据获取的结果类型放入相应的队列中：
-
-response类型，放入response_queue队列中；
-
-request类型，重新放入request队列中，等待再次重试获取；
-
+- Smart retry mechanism with exponential backoff
 """
 
 import asyncio
 import logging
+import time
 from abc import abstractmethod
-from inspect import iscoroutinefunction
 from typing import Optional, Union
 
 import httpx
 
-from webants.libs import Request, Response
+from webants.libs import Request
 from webants.utils.logger import get_logger
 
 
@@ -91,6 +84,19 @@ class BaseDownloader:
 class Downloader(BaseDownloader):
     """Concrete implementation of downloader using httpx library."""
 
+    # Define retry strategies for different error types
+    RETRY_CODES = {
+        403: {"max_retries": 5, "backoff_factor": 2},  # Forbidden
+        404: {"max_retries": 5, "backoff_factor": 2},  # Not Found
+        408: {"max_retries": 3, "backoff_factor": 2},  # Request Timeout
+        420: {"max_retries": 3, "backoff_factor": 2},  # Bad Request
+        429: {"max_retries": 3, "backoff_factor": 5},  # Too Many Requests
+        500: {"max_retries": 3, "backoff_factor": 2},  # Server Error
+        502: {"max_retries": 3, "backoff_factor": 2},  # Bad Gateway
+        503: {"max_retries": 3, "backoff_factor": 2},  # Service Unavailable
+        504: {"max_retries": 3, "backoff_factor": 2},  # Gateway Timeout
+    }
+
     def __init__(
         self,
         request_queue: Optional[asyncio.PriorityQueue] = None,
@@ -109,15 +115,34 @@ class Downloader(BaseDownloader):
             log_level: Logging level
             concurrency: Maximum number of concurrent downloads
             loop: Event loop to use
-            **kwargs: Additional configuration parameters
+            **kwargs: Additional configuration parameters:
+                - delay: Default delay between requests (seconds)
+                - timeout: Default request timeout (seconds)
+                - retry_delay: Base delay for retry mechanism (seconds)
+                - headers: Custom HTTP headers
+                - cookies: Custom cookies
+                - encoding: Default response encoding
         """
         super().__init__(request_queue=request_queue, response_queue=response_queue)
         self.logger = get_logger(self.__class__.__name__, log_level=log_level)
 
-        # Event loop setup
-        self.loop = self._setup_event_loop(loop)
+        # Statistics
+        self.stats: dict[str, int | float] = {
+            "total_requests": 0,
+            "successful_requests": 0,
+            "failed_requests": 0,
+            "retry_requests": 0,
+            "total_time": 0.0,
+        }
 
-        # HTTP client configuration
+        # Configuration
+        self.delay = kwargs.get("delay", 0)
+        self.timeout = kwargs.get("timeout", 30)
+        self.retry_delay = kwargs.get("retry_delay", 1)
+        self.default_encoding = kwargs.get("encoding", "utf-8")
+
+        # Event loop and client setup
+        self.loop = self._setup_event_loop(loop)
         self.headers = self._setup_headers(kwargs.get("headers", {}))
         self.cookies = kwargs.get("cookies", {})
         self.client = self._setup_http_client()
@@ -125,10 +150,6 @@ class Downloader(BaseDownloader):
         # Concurrency control
         self.concurrency = concurrency
         self.sem = asyncio.Semaphore(concurrency)
-
-        # Additional settings
-        self.delay = kwargs.get("delay", 0)
-        self.default_encoding = kwargs.get("encoding", "utf-8")
         self.kwargs = kwargs
 
     def _setup_headers(self, headers: dict) -> dict:
@@ -164,105 +185,164 @@ class Downloader(BaseDownloader):
             self._close_loop = True
         return loop
 
-    async def _fetch(self, request: Request) -> Union[httpx.Response, Exception, None]:
+    async def _fetch(self, request: Request) -> Union[httpx.Response, Request]:
+        """Fetch a resource based on the request with advanced error handling.
+
+        Args:
+            request: Request object containing URL and parameters
+
+        Returns:
+            Either a successful response or the original request for retry
+        """
+        start_time = time.time()
         delay = request.delay or self.delay
-        self.logger.debug(f"Fetching {request}, delay<{delay}>")
+        self.logger.debug(f"Fetching {request}, delay: {delay}s")
         await asyncio.sleep(delay)
 
-        # if not request.headers:
         headers = request.headers or self.headers
-
-        self.logger.debug(f"request headers: {headers}")
+        self.stats["total_requests"] += 1
 
         try:
-            # 发送请求，并包装成Response
-            # httpx.AsyncClient.request()方法会自动处理重定向和cookies
-            resp = await self.client.request(
+            response = await self.client.request(
                 method=request.method,
                 url=request.url,
                 headers=headers,
-                timeout=request.timeout,
+                timeout=request.timeout or self.timeout,
             )
-            return resp
 
-        except httpx.TimeoutException as e:
+            elapsed = time.time() - start_time
+            self.stats["total_time"] += elapsed
+
+            # Log detailed request information
+            self.logger.info(
+                f"Request completed - {request}, "
+                f"Status: {response.status_code}, "
+                f"Time: {elapsed:.3f}s"
+            )
+            if response.status_code not in self.RETRY_CODES:
+                self.stats["successful_requests"] += 1
+            return response
+
+        except httpx.HTTPError as e:
+            elapsed = time.time() - start_time
+            self.stats["total_time"] += elapsed
+            self.stats["failed_requests"] += 1
+
             self.logger.error(
-                f"Timeout, retries {request}<{request.retries}> again later."
+                f"HTTP Error: {str(e)}, {request}, "
+                f"Retries left: {request.retries - 1}, "
+                f"Time: {elapsed:.2f}s"
             )
-            return e
-        except httpx.RequestError as e:
-            self.logger.error(
-                f"RequestError, retries {request}<{request.retries}> again later."
-            )
-            return e
+            return request
 
-    async def _retry(
-        self, request: Request, exception: Exception
-    ) -> Optional[httpx.Response]:
-        request.retries -= 1
-        # request.priority += 10
+        except Exception as e:
+            self.stats["failed_requests"] += 1
+            self.logger.error(f"Unexpected error: {str(e)}, {request}")
+            return request
 
-        self.logger.info(
-            f"<Retry, url: {request.url}>, times: {request.retries}, reason: {exception}>"
-        )
-        if request.retries > 0:
-            return await self.fetch(request)
-        else:
-            return httpx.Response(
-                status_code=600,
-                request=httpx.Request(request.method, request.url),
-                # body=bytes(str(exception), encoding=self.default_encoding),
-            )
+    async def fetch_retry(self, request: Request) -> Optional[httpx.Response]:
+        """Fetch resources using an adaptive retry mechanism with exponential backoff strategy.
 
-    async def fetch(self, request: Request) -> Optional[httpx.Response]:
+        This method implements a smart retry mechanism with the following features:
+        1. Conditional retry based on HTTP status codes
+        2. Exponential backoff algorithm to avoid frequent retries
+        3. Dynamic request priority adjustment
+        4. Detailed retry status tracking
+
+        Args:
+            request: Request object containing URL and other parameters
+
+        Returns:
+            Response object on success, None during retry, failed response when retries exhausted
+        """
+        async with self.sem:
+            result = await self._fetch(request)
+
+            if isinstance(result, httpx.Response):
+                # Handle HTTP status code triggered retries
+                if result.status_code in self.RETRY_CODES:
+                    if request.retries > 0:
+                        retry_config = self.RETRY_CODES[result.status_code]
+                        # Calculate exponential backoff delay
+                        backoff_delay = self.retry_delay * (
+                            retry_config["backoff_factor"]
+                            ** (retry_config["max_retries"] - request.retries)
+                        )
+
+                        # Update request status
+                        request.delay = backoff_delay
+                        request.retries -= 1
+
+                        # Log retry status
+                        self.logger.warning(
+                            f"Retrying request - {request}, "
+                            f"Status code: {result.status_code}, "
+                            f"Retries remaining: {request.retries}, "
+                            f"Delay: {backoff_delay:.2f}s"
+                        )
+
+                        self.stats["retry_requests"] += 1
+                        # Re-queue for retry
+                        self.request_queue.put_nowait((request.priority, request))
+                        return None
+                    else:
+                        return None
+                # Handle successful response
+                if request.callback is None:
+                    return result
+                return await request.callback(result, request.cb_kwargs)
+
+            # Handle request exception triggered retries
+            elif isinstance(result, Request):
+                request.retries -= 1
+                request.priority += 10  # Lower priority for retry requests
+
+                if request.retries > 0:
+                    self.logger.warning(
+                        f"Request failed, retrying : {request}, "
+                        f"Retries remaining: {request.retries}, "
+                        f"New priority: {request.priority}"
+                    )
+                    self.request_queue.put_nowait((request.priority, request))
+                    return None
+                else:
+                    # Retries exhausted, return failure response
+                    self.logger.error(
+                        f"Request finally failed: {request}, Retries exhausted"
+                    )
+                    return httpx.Response(
+                        status_code=600,  # Custom status code indicating retry failure
+                        extensions={"Request": request, "retry_exhausted": True},
+                    )
+
+    async def fetch(self, request: Request) -> httpx.Response:
         """Fetch a resource based on the request.
 
         Args:
             request: Request object containing URL and other parameters
 
         Returns:
-            Response object or None if request fails
+            Response object
         """
 
-        try:
-            async with self.sem:
-                if request.url.startswith("http"):
-                    result = await self._fetch(request)
-                elif request.url.startswith("file"):
-                    result = await self._fetch_local(request)
-        except Exception as e:
-            # result = None
-            self.logger.error(f"<Error: {request.url} {e}>")
-            return None
+        async with self.sem:
+            result = await self._fetch(request)
+            if isinstance(result, httpx.Response):
+                if request.callback is None:
+                    return result
+                return await request.callback(result, request.cb_kwargs)
 
-        if isinstance(result, httpx.Response):
-            if request.callback is None:
-                return result
-            if iscoroutinefunction(request.callback):
-                result = await request.callback(result, request.cb_kwargs)
-            else:
-                result = request.callback(result, request.cb_kwargs)
-        elif isinstance(result, Request):
-            if request.retries > 0:
-                request.retries -= 1
-                request.priority += 10
-                self.request_queue.put_nowait((request.priority, request))
-            result = None
-        else:
-            result = await self._retry(request, result)
-
-        return result
+            elif isinstance(result, Request):
+                return httpx.Response(status_code=600, extensions={"Request": request})
 
     async def start_worker(self) -> None:
         """Process queue items forever."""
 
         while True:
             request = await self._next_request()
-            # if request is None:
-            #     continue
-            resp = await self.fetch(request)
+            resp = await self.fetch_retry(request)
 
-            if self.response_queue:
+            if self.response_queue and resp:
                 self.response_queue.put_nowait(resp)
 
             # Notify the queue that the "work item" has been processed.
@@ -273,13 +353,12 @@ class Downloader(BaseDownloader):
         many = many or self.concurrency
         self.logger.info(f"Start {self.__class__.__name__}...")
         try:
-            # __ = [asyncio.create_task(self.worker())
-            #       for _ in range(min(self.request_queue.qsize(), self.concurrency) or 1)]
             __ = [
                 asyncio.create_task(self.start_worker())
                 for _ in range(min(self.concurrency, many))
             ]
             await self.request_queue.join()
+            # await asyncio.gather(*__)
         except Exception as e:
             raise e
 
@@ -295,16 +374,32 @@ class Downloader(BaseDownloader):
 if __name__ == "__main__":
 
     async def main():
-        pd = Downloader(asyncio.PriorityQueue())
-        resp = await pd.fetch(
-            Request(
-                "http://www.google.com"
+        pd = Downloader()
+        pd.request_queue.put_nowait((0, Request("http://localhost:8088/12")))
+        for i in range(10):
+            pd.request_queue.put_nowait(
+                (0, Request(f"http://localhost:8088/get?no={i}"))
             )
-        )
+        resp = await pd.fetch(Request("http://localhost:8088/get?no=12"))
+
         print(resp)
         print(resp.request.headers)
         print(resp.text)
+
         # print(resp.json)
+        async def _print():
+            while True:
+                await asyncio.sleep(0.1)
+                if pd.response_queue.empty():
+                    break
+                _ = pd.response_queue.get_nowait()
+                print(_.status_code, _.text)
+
+        async with asyncio.TaskGroup() as tg:
+            tg.create_task(pd.start_downloader())
+            tg.create_task(_print())
+
+        print(pd.stats)
         await pd.close()
 
     asyncio.run(main())
