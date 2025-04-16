@@ -8,4 +8,4 @@ tests/
 /webants.egg-info/
 /dist/
 .venv
-
+.coverage
