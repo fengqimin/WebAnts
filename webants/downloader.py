@@ -15,7 +15,7 @@ from typing import Optional, Union
 
 import httpx
 
-from webants.libs import Request
+from webants.libs.request import Request
 from webants.utils.logger import get_logger
 
 
@@ -148,7 +148,12 @@ class Downloader(BaseDownloader):
         self.timeout = self._setup_timeout(kwargs.get("timeout", 30))
         self.default_encoding = kwargs.get("encoding", "utf-8")
         self.follow_redirects = kwargs.get("follow_redirects", True)
-        
+
+        # Concurrency control
+        self.concurrency = concurrency
+        self.sem = asyncio.Semaphore(concurrency)
+        self.kwargs = kwargs
+
         # Event loop and client setup
         self.loop = self._setup_event_loop(loop)
         self.headers = self._setup_headers(kwargs.get("headers", {}))
@@ -156,13 +161,8 @@ class Downloader(BaseDownloader):
         self.limits = self._setup_limits(kwargs.get("limits", {}))
         self.proxies = kwargs.get("proxies")
         self.http2 = kwargs.get("http2", False)
-        
-        self.client = self._setup_http_client()
 
-        # Concurrency control
-        self.concurrency = concurrency
-        self.sem = asyncio.Semaphore(concurrency)
-        self.kwargs = kwargs
+        self.client = self._setup_http_client()
 
         # retry mechanism
         self.retry_delay = kwargs.get("retry_delay", 1)
@@ -198,7 +198,7 @@ class Downloader(BaseDownloader):
             cookies=self.cookies,
             timeout=self.timeout,
             limits=self.limits,
-            proxies=self.proxies,
+            proxy=self.proxies,
             follow_redirects=self.follow_redirects,
             http2=self.http2,
         )
@@ -283,7 +283,9 @@ class Downloader(BaseDownloader):
         self.stats["total_time"] += elapsed
         self.stats["min_response_time"] = min(self.stats["min_response_time"], elapsed)
         self.stats["max_response_time"] = max(self.stats["max_response_time"], elapsed)
-        total_requests = self.stats["successful_requests"] + self.stats["failed_requests"]
+        total_requests = (
+            self.stats["successful_requests"] + self.stats["failed_requests"]
+        )
         if total_requests > 0:
             self.stats["avg_response_time"] = self.stats["total_time"] / total_requests
 
