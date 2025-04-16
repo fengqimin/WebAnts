@@ -132,13 +132,13 @@ class Downloader(BaseDownloader):
             "successful_requests": 0,
             "failed_requests": 0,
             "retry_requests": 0,
+            "total_retries": 0,
             "total_time": 0.0,
         }
 
         # Configuration
         self.delay = kwargs.get("delay", 0)
         self.timeout = kwargs.get("timeout", 30)
-        self.retry_delay = kwargs.get("retry_delay", 1)
         self.default_encoding = kwargs.get("encoding", "utf-8")
 
         # Event loop and client setup
@@ -151,6 +151,10 @@ class Downloader(BaseDownloader):
         self.concurrency = concurrency
         self.sem = asyncio.Semaphore(concurrency)
         self.kwargs = kwargs
+
+        # retry mechanism
+        self.retry_delay = kwargs.get("retry_delay", 1)
+        self.retry_requests = set()
 
     def _setup_headers(self, headers: dict) -> dict:
         """Setup default headers with user agent if not provided."""
@@ -165,6 +169,7 @@ class Downloader(BaseDownloader):
         return httpx.AsyncClient(
             headers=self.headers,
             cookies=self.cookies,
+            timeout=httpx.Timeout(self.timeout),
             http2=False,
         )
 
@@ -200,7 +205,8 @@ class Downloader(BaseDownloader):
         await asyncio.sleep(delay)
 
         headers = request.headers or self.headers
-        self.stats["total_requests"] += 1
+        if request.url not in self.retry_requests:
+            self.stats["total_requests"] += 1
 
         try:
             response = await self.client.request(
@@ -221,6 +227,7 @@ class Downloader(BaseDownloader):
             )
             if response.status_code not in self.RETRY_CODES:
                 self.stats["successful_requests"] += 1
+
             return response
 
         except httpx.HTTPError as e:
@@ -238,7 +245,23 @@ class Downloader(BaseDownloader):
         except Exception as e:
             self.stats["failed_requests"] += 1
             self.logger.error(f"Unexpected error: {str(e)}, {request}")
+
             return request
+
+    def _retry_request(self, request: Request) -> Request:
+        """Retry a request by re-queuing it with adjusted priority."""
+        self.stats["total_retries"] += 1
+
+        request.retries -= 1
+        request.priority += 10  # Lower priority for retry requests
+
+        if request.url not in self.retry_requests:
+            self.stats["retry_requests"] += 1
+            self.retry_requests.add(request.url)
+
+        self.request_queue.put_nowait((request.priority, request))
+
+        return request
 
     async def fetch_retry(self, request: Request) -> Optional[httpx.Response]:
         """Fetch resources using an adaptive retry mechanism with exponential backoff strategy.
@@ -255,65 +278,65 @@ class Downloader(BaseDownloader):
         Returns:
             Response object on success, None during retry, failed response when retries exhausted
         """
-        async with self.sem:
-            result = await self._fetch(request)
 
-            if isinstance(result, httpx.Response):
-                # Handle HTTP status code triggered retries
-                if result.status_code in self.RETRY_CODES:
-                    if request.retries > 0:
-                        retry_config = self.RETRY_CODES[result.status_code]
-                        # Calculate exponential backoff delay
-                        backoff_delay = self.retry_delay * (
-                            retry_config["backoff_factor"]
-                            ** (retry_config["max_retries"] - request.retries)
-                        )
+        result = await self._fetch(request)
 
-                        # Update request status
-                        request.delay = backoff_delay
-                        request.retries -= 1
+        if isinstance(result, httpx.Response):
+            # Handle HTTP status code triggered retries
+            if result.status_code in self.RETRY_CODES:
+                if request.retries > 0:
+                    retry_config = self.RETRY_CODES[result.status_code]
+                    # Calculate exponential backoff delay
+                    backoff_delay = self.retry_delay * (
+                        retry_config["backoff_factor"]
+                        ** (retry_config["max_retries"] - request.retries)
+                    )
 
-                        # Log retry status
-                        self.logger.warning(
-                            f"Retrying request - {request}, "
-                            f"Status code: {result.status_code}, "
-                            f"Retries remaining: {request.retries}, "
-                            f"Delay: {backoff_delay:.2f}s"
-                        )
+                    # Update request status
+                    request.delay = backoff_delay
 
-                        self.stats["retry_requests"] += 1
-                        # Re-queue for retry
-                        self.request_queue.put_nowait((request.priority, request))
-                        return None
-                    else:
-                        return None
-                # Handle successful response
-                if request.callback is None:
-                    return result
-                return await request.callback(result, request.cb_kwargs)
+                    request = self._retry_request(request)
 
-            # Handle request exception triggered retries
-            elif isinstance(result, Request):
+                    # Log retry status
+                    self.logger.warning(
+                        f"Retrying request - {request}, "
+                        f"Status code: {result.status_code}, "
+                        f"Retries remaining: {request.retries}, "
+                        f"New priority: {request.priority}, "
+                        f"Delay: {backoff_delay:.2f}s"
+                    )
+
+                    return None
+                else:
+                    return None
+            # Handle successful response
+            if request.callback is None:
+                return result
+            return await request.callback(result, request.cb_kwargs)
+
+        # Handle request exception triggered retries
+        elif isinstance(result, Request):
+            if request.retries > 0:
                 request.retries -= 1
                 request.priority += 10  # Lower priority for retry requests
 
-                if request.retries > 0:
-                    self.logger.warning(
-                        f"Request failed, retrying : {request}, "
-                        f"Retries remaining: {request.retries}, "
-                        f"New priority: {request.priority}"
-                    )
-                    self.request_queue.put_nowait((request.priority, request))
-                    return None
-                else:
-                    # Retries exhausted, return failure response
-                    self.logger.error(
-                        f"Request finally failed: {request}, Retries exhausted"
-                    )
-                    return httpx.Response(
-                        status_code=600,  # Custom status code indicating retry failure
-                        extensions={"Request": request, "retry_exhausted": True},
-                    )
+                self.request_queue.put_nowait((request.priority, request))
+
+                self.logger.warning(
+                    f"Request failed, retrying : {request}, "
+                    f"Retries remaining: {request.retries}, "
+                    f"New priority: {request.priority}"
+                )
+                return None
+            else:
+                # Retries exhausted, return failure response
+                self.logger.error(
+                    f"Request finally failed: {request}, Retries exhausted"
+                )
+                return httpx.Response(
+                    status_code=600,  # Custom status code indicating retry failure
+                    extensions={"Request": request, "retry_exhausted": True},
+                )
 
     async def fetch(self, request: Request) -> httpx.Response:
         """Fetch a resource based on the request.
@@ -325,40 +348,42 @@ class Downloader(BaseDownloader):
             Response object
         """
 
-        async with self.sem:
-            result = await self._fetch(request)
-            if isinstance(result, httpx.Response):
-                if request.callback is None:
-                    return result
-                return await request.callback(result, request.cb_kwargs)
+        result = await self._fetch(request)
+        if isinstance(result, httpx.Response):
+            if request.callback is None:
+                return result
+            return await request.callback(result, request.cb_kwargs)
 
-            elif isinstance(result, Request):
-                return httpx.Response(status_code=600, extensions={"Request": request})
+        elif isinstance(result, Request):
+            return httpx.Response(status_code=600, extensions={"Request": request})
 
     async def start_worker(self) -> None:
         """Process queue items forever."""
 
         while True:
-            request = await self._next_request()
-            resp = await self.fetch_retry(request)
+            async with self.sem:
+                request = await self._next_request()
+                resp = await self.fetch_retry(request)
 
-            if self.response_queue and resp:
-                self.response_queue.put_nowait(resp)
+                if self.response_queue and resp:
+                    self.response_queue.put_nowait(resp)
 
-            # Notify the queue that the "work item" has been processed.
-            self.request_queue.task_done()
+                # Notify the queue that the "work item" has been processed.
+                self.request_queue.task_done()
 
     async def start_downloader(self, many: int = None) -> None:
         """Run {many} workers until all tasks finished."""
         many = many or self.concurrency
         self.logger.info(f"Start {self.__class__.__name__}...")
+
+        self.logger.debug(f"Downloader started with {many} workers.")
         try:
-            __ = [
-                asyncio.create_task(self.start_worker())
-                for _ in range(min(self.concurrency, many))
-            ]
+            __ = [asyncio.create_task(self.start_worker()) for _ in range(many)]
             await self.request_queue.join()
-            # await asyncio.gather(*__)
+
+            # async with asyncio.TaskGroup() as tg:
+            #      __ = [tg.create_task(self.start_worker()) for _ in range(many)]
+
         except Exception as e:
             raise e
 
@@ -375,29 +400,28 @@ if __name__ == "__main__":
 
     async def main():
         pd = Downloader()
+
         pd.request_queue.put_nowait((0, Request("http://localhost:8088/12")))
-        for i in range(10):
+
+        for i in range(20):
             pd.request_queue.put_nowait(
                 (0, Request(f"http://localhost:8088/get?no={i}"))
             )
-        resp = await pd.fetch(Request("http://localhost:8088/get?no=12"))
+        print(pd.stats)
 
-        print(resp)
-        print(resp.request.headers)
-        print(resp.text)
-
-        # print(resp.json)
         async def _print():
             while True:
-                await asyncio.sleep(0.1)
+                await asyncio.sleep(0.05)
                 if pd.response_queue.empty():
                     break
                 _ = pd.response_queue.get_nowait()
                 print(_.status_code, _.text)
+                pd.response_queue.task_done()
 
         async with asyncio.TaskGroup() as tg:
-            tg.create_task(pd.start_downloader())
-            tg.create_task(_print())
+            tg.create_task(pd.start_downloader(17))
+            # tg.create_task(_print())
+            # tg.create_task(pd.request_queue.join())
 
         print(pd.stats)
         await pd.close()
