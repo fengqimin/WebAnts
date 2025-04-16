@@ -7,7 +7,7 @@ from urllib.parse import urlparse, urljoin
 from lxml import etree
 from lxml.cssselect import CSSSelector
 
-from webants.libs import InvalidExtractor
+from webants.libs.exceptions import InvalidExtractor
 from webants.utils.logger import get_logger
 from webants.utils.misc import args_to_list
 from webants.utils.url import lenient_host, normalize_url
@@ -16,7 +16,7 @@ __all__ = [
     "Link",
     # Functions
     "iter_elements",
-    "find_elements", 
+    "find_elements",
     "extract_attrib",
     "extract_links",
     "extract_and_filter_links",
@@ -34,7 +34,7 @@ __all__ = [
 ]
 
 _ET = TypeVar(
-    "_ET", "ElementExtractor", "LinkExtractor", "MediaExtractor", "TextExtractor"
+    "_ET", "ElementExtractor", "LinkExtractor", "TextExtractor"
 )
 
 
@@ -65,12 +65,12 @@ def iter_elements(
     attr: str = None,
 ) -> Generator[etree.ElementBase, None, None]:
     """Iterate through all elements matching tags and attr
-    
+
     Args:
         html: HTML element to process
         tags: Tag names to match, can be single tag name or list of tag names
         attr: Attribute name to match, if None no attribute matching is done
-        
+
     Returns:
         List of matching elements
     """
@@ -111,9 +111,9 @@ def find_elements(
         List of matching elements
     """
     # Check if html is of type str or etree.ElementBase.__base__
-    assert isinstance(
-        html, (str, etree.ElementBase.__base__)
-    ), f"Expected 'str' or 'etree._Element', got '{html.__class__.__name__}'"
+    assert isinstance(html, (str, etree.ElementBase.__base__)), (
+        f"Expected 'str' or 'etree._Element', got '{html.__class__.__name__}'"
+    )
 
     # If html is a string, convert it to etree._Element object
     if isinstance(html, str):
@@ -129,11 +129,13 @@ def find_elements(
         return html.xpath(xpath)
     # If neither selector nor XPath is provided, use iter_elements function to find elements based on tags and attributes
     else:
-        return list(iter_elements(
-            html,
-            tags=tags,
-            attr=attr,
-        ))
+        return list(
+            iter_elements(
+                html,
+                tags=tags,
+                attr=attr,
+            )
+        )
 
 
 def extract_attrib(
@@ -196,9 +198,9 @@ def extract_links(
         List of Link objects
     """
     if base_url:
-        assert isinstance(
-            base_url, str
-        ), f"Expected str, got {base_url.__class__.__name__}"
+        assert isinstance(base_url, str), (
+            f"Expected str, got {base_url.__class__.__name__}"
+        )
         assert urlparse(base_url).scheme, f"Expected absolute URL, got {base_url}"
 
     results = []
@@ -442,9 +444,9 @@ class ExtractorFactory:
 class _ExtractorMeta(type):
     """Extractor metaclass
 
-    By calling the registration method of the factory class (Extractor), 
+    By calling the registration method of the factory class (Extractor),
     store the entire class object {by class name: class object} in a dictionary.
-    The factory method retrieves the class object by class name, 
+    The factory method retrieves the class object by class name,
     eliminating the need for manual code modification.
     """
 
@@ -483,7 +485,7 @@ class BaseExtractor(metaclass=_ExtractorMeta):
 class _LxmlElementExtractor(BaseExtractor):
     """LxmlElementExtractor base class
 
-    Use lxml library to extract specific elements (Element) and content from xml, html documents 
+    Use lxml library to extract specific elements (Element) and content from xml, html documents
     based on css, xpath or tags (and attrs). Extraction order: css, xpath, tags.
     """
 
@@ -580,9 +582,9 @@ class _LxmlElementExtractor(BaseExtractor):
         if html is None:
             return []
 
-        assert isinstance(
-            html, (str, etree.ElementBase.__base__)
-        ), f"Expected 'str' or 'etree._Element', got '{html.__class__.__name__}'"
+        assert isinstance(html, (str, etree.ElementBase.__base__)), (
+            f"Expected 'str' or 'etree._Element', got '{html.__class__.__name__}'"
+        )
 
         if isinstance(html, str) and len(html) > 0:
             try:
@@ -681,12 +683,12 @@ class LinkExtractor(AttribExtractor):
 
         self.base_url = base_url
         if self.base_url:
-            assert isinstance(
-                self.base_url, str
-            ), f"Expected str, got {self.base_url.__class__.__name__}"
-            assert urlparse(
-                self.base_url
-            ).scheme, f"Expected absolute URL, got {self.base_url}"
+            assert isinstance(self.base_url, str), (
+                f"Expected str, got {self.base_url.__class__.__name__}"
+            )
+            assert urlparse(self.base_url).scheme, (
+                f"Expected absolute URL, got {self.base_url}"
+            )
         self.unique = unique
 
     def _extract_element(self, element: etree._Element | str) -> Link | None:

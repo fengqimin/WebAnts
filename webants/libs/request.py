@@ -211,7 +211,6 @@ class Request:
                 self.url,
                 keep_fragments=keep_fragments,
                 keep_auth=keep_auth,
-                normalize=normalize
             )
         ]
         

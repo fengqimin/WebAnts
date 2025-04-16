@@ -435,36 +435,3 @@ class Downloader(BaseDownloader):
         await self.client.aclose()
 
         self.logger.info(f"{self.__class__.__name__} has been closed.")
-
-
-if __name__ == "__main__":
-
-    async def main():
-        pd = Downloader()
-
-        pd.request_queue.put_nowait((0, Request("http://localhost:8088/12")))
-
-        for i in range(20):
-            pd.request_queue.put_nowait(
-                (0, Request(f"http://localhost:8088/get?no={i}"))
-            )
-        print(pd.stats)
-
-        async def _print():
-            while True:
-                await asyncio.sleep(0.05)
-                if pd.response_queue.empty():
-                    break
-                _ = pd.response_queue.get_nowait()
-                print(_.status_code, _.text)
-                pd.response_queue.task_done()
-
-        async with asyncio.TaskGroup() as tg:
-            tg.create_task(pd.start_downloader(17))
-            # tg.create_task(_print())
-            # tg.create_task(pd.request_queue.join())
-
-        print(pd.stats)
-        await pd.close()
-
-    asyncio.run(main())

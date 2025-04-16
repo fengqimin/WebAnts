@@ -7,22 +7,48 @@ This module defines a comprehensive exception hierarchy for the crawler with:
 - Integration with monitoring
 """
 
-from typing import Any, Dict, Optional, Type
+from typing import Any, Dict, Optional
+
+# __all__ = ["WebAntsException","Re"]
+__all__ = [
+    "AuthenticationError",
+    "CircuitBreakerError",
+    "ConnectionError",
+    "ExceptionTracker",
+    "ExtractorError",
+    "InvalidRequestMethod",
+    "InvalidSelector",
+    "InvalidURL",
+    "LoadError",
+    "MiddlewareError",
+    "ParserError",
+    "PersistenceError",
+    "RateLimitError",
+    "RequestError",
+    "RequestTimeout",
+    "SpiderConfigError",
+    "SpiderError",
+    "SpiderInitError",
+    "SpiderStopError",
+    "StorageError",
+    "TooManyRedirects",
+    "WebAntsException",
+]
 
 
 class WebAntsException(Exception):
     """Base exception class for WebAnts crawler."""
-    
+
     def __init__(
         self,
         message: str,
         *,
         code: Optional[str] = None,
         retryable: bool = False,
-        metadata: Optional[Dict[str, Any]] = None
+        metadata: Optional[Dict[str, Any]] = None,
     ):
         """Initialize exception.
-        
+
         Args:
             message: Error message
             code: Error code for categorization
@@ -33,7 +59,7 @@ class WebAntsException(Exception):
         self.code = code or self.__class__.__name__
         self.retryable = retryable
         self.metadata = metadata or {}
-        
+
     def __str__(self) -> str:
         """String representation with metadata."""
         parts = [super().__str__()]
@@ -47,31 +73,28 @@ class WebAntsException(Exception):
 # Request/Response Exceptions
 class RequestError(WebAntsException):
     """Base class for request-related errors."""
+
     pass
 
 
 class InvalidRequestMethod(RequestError):
     """Invalid HTTP method specified."""
+
     pass
 
 
 class InvalidURL(RequestError):
     """Invalid URL format."""
+
     pass
 
 
 class RequestTimeout(RequestError):
     """Request timed out."""
-    
-    def __init__(
-        self,
-        message: str = "Request timed out",
-        *,
-        timeout: float,
-        **kwargs
-    ):
+
+    def __init__(self, message: str = "Request timed out", *, timeout: float, **kwargs):
         """Initialize timeout error.
-        
+
         Args:
             message: Error message
             timeout: Timeout duration
@@ -81,22 +104,18 @@ class RequestTimeout(RequestError):
             message,
             code="TIMEOUT",
             retryable=True,
-            metadata={"timeout": timeout, **kwargs}
+            metadata={"timeout": timeout, **kwargs},
         )
 
 
 class TooManyRedirects(RequestError):
     """Too many redirects encountered."""
-    
+
     def __init__(
-        self,
-        message: str = "Too many redirects",
-        *,
-        redirect_count: int,
-        **kwargs
+        self, message: str = "Too many redirects", *, redirect_count: int, **kwargs
     ):
         """Initialize redirect error.
-        
+
         Args:
             message: Error message
             redirect_count: Number of redirects
@@ -106,23 +125,23 @@ class TooManyRedirects(RequestError):
             message,
             code="REDIRECT_LIMIT",
             retryable=False,
-            metadata={"redirect_count": redirect_count, **kwargs}
+            metadata={"redirect_count": redirect_count, **kwargs},
         )
 
 
 class ConnectionError(RequestError):
     """Network connection error."""
-    
+
     def __init__(
         self,
         message: str,
         *,
         host: Optional[str] = None,
         port: Optional[int] = None,
-        **kwargs
+        **kwargs,
     ):
         """Initialize connection error.
-        
+
         Args:
             message: Error message
             host: Target host
@@ -133,38 +152,42 @@ class ConnectionError(RequestError):
             message,
             code="CONNECTION_ERROR",
             retryable=True,
-            metadata={
-                "host": host,
-                "port": port,
-                **kwargs
-            }
+            metadata={"host": host, "port": port, **kwargs},
         )
 
 
 # Parser Exceptions
 class ParserError(WebAntsException):
     """Base class for parsing errors."""
+
     pass
 
 
 class InvalidSelector(ParserError):
     """Invalid selector syntax."""
+
+    pass
+
+
+class InvalidExtractor(ParserError):
+    """Invalid extractor"""
+
     pass
 
 
 class ExtractorError(ParserError):
     """Data extraction error."""
-    
+
     def __init__(
         self,
         message: str,
         *,
         selector: Optional[str] = None,
         field: Optional[str] = None,
-        **kwargs
+        **kwargs,
     ):
         """Initialize extractor error.
-        
+
         Args:
             message: Error message
             selector: Failed selector
@@ -175,54 +198,55 @@ class ExtractorError(ParserError):
             message,
             code="EXTRACTION_ERROR",
             retryable=False,
-            metadata={
-                "selector": selector,
-                "field": field,
-                **kwargs
-            }
+            metadata={"selector": selector, "field": field, **kwargs},
         )
 
 
 # Spider Exceptions
 class SpiderError(WebAntsException):
     """Base class for spider errors."""
+
     pass
 
 
 class SpiderConfigError(SpiderError):
     """Spider configuration error."""
+
     pass
 
 
 class SpiderInitError(SpiderError):
     """Spider initialization error."""
+
     pass
 
 
 class SpiderStopError(SpiderError):
     """Spider stopped due to error."""
+
     pass
 
 
 # Middleware Exceptions
 class MiddlewareError(WebAntsException):
     """Base class for middleware errors."""
+
     pass
 
 
 class CircuitBreakerError(MiddlewareError):
     """Circuit breaker is open."""
-    
+
     def __init__(
         self,
         message: str = "Circuit breaker is open",
         *,
         domain: str,
         failures: int,
-        **kwargs
+        **kwargs,
     ):
         """Initialize circuit breaker error.
-        
+
         Args:
             message: Error message
             domain: Affected domain
@@ -233,34 +257,33 @@ class CircuitBreakerError(MiddlewareError):
             message,
             code="CIRCUIT_OPEN",
             retryable=False,
-            metadata={
-                "domain": domain,
-                "failures": failures,
-                **kwargs
-            }
+            metadata={"domain": domain, "failures": failures, **kwargs},
         )
 
 
 # Storage Exceptions
 class StorageError(WebAntsException):
     """Base class for storage errors."""
+
     pass
 
 
 class PersistenceError(StorageError):
     """Data persistence error."""
+
     pass
 
 
 class LoadError(StorageError):
     """Data loading error."""
+
     pass
 
 
 # Rate Limiting
 class RateLimitError(WebAntsException):
     """Rate limit exceeded."""
-    
+
     def __init__(
         self,
         message: str = "Rate limit exceeded",
@@ -268,10 +291,10 @@ class RateLimitError(WebAntsException):
         domain: str,
         limit: Optional[int] = None,
         reset_after: Optional[float] = None,
-        **kwargs
+        **kwargs,
     ):
         """Initialize rate limit error.
-        
+
         Args:
             message: Error message
             domain: Rate limited domain
@@ -287,25 +310,25 @@ class RateLimitError(WebAntsException):
                 "domain": domain,
                 "limit": limit,
                 "reset_after": reset_after,
-                **kwargs
-            }
+                **kwargs,
+            },
         )
 
 
 # Authentication
 class AuthenticationError(WebAntsException):
     """Authentication failed."""
-    
+
     def __init__(
         self,
         message: str = "Authentication failed",
         *,
         domain: str,
         status_code: Optional[int] = None,
-        **kwargs
+        **kwargs,
     ):
         """Initialize authentication error.
-        
+
         Args:
             message: Error message
             domain: Authentication domain
@@ -316,28 +339,20 @@ class AuthenticationError(WebAntsException):
             message,
             code="AUTH_ERROR",
             retryable=False,
-            metadata={
-                "domain": domain,
-                "status_code": status_code,
-                **kwargs
-            }
+            metadata={"domain": domain, "status_code": status_code, **kwargs},
         )
 
 
 class ExceptionTracker:
     """Track and analyze exceptions."""
-    
+
     def __init__(self):
         """Initialize exception tracker."""
         self.exceptions: Dict[str, Dict[str, Any]] = {}
-        
-    def track(
-        self,
-        exception: WebAntsException,
-        handled: bool = True
-    ) -> None:
+
+    def track(self, exception: WebAntsException, handled: bool = True) -> None:
         """Track an exception occurrence.
-        
+
         Args:
             exception: Exception instance
             handled: Whether exception was handled
@@ -350,29 +365,30 @@ class ExceptionTracker:
                 "unhandled": 0,
                 "first_seen": None,
                 "last_seen": None,
-                "metadata": {}
+                "metadata": {},
             }
-            
+
         stats = self.exceptions[code]
         stats["count"] += 1
         if handled:
             stats["handled"] += 1
         else:
             stats["unhandled"] += 1
-            
+
         # Track timing
         import time
+
         now = time.time()
         if not stats["first_seen"]:
             stats["first_seen"] = now
         stats["last_seen"] = now
-        
+
         # Merge metadata
         stats["metadata"].update(exception.metadata)
-        
+
     def get_stats(self) -> Dict[str, Any]:
         """Get exception statistics.
-        
+
         Returns:
             Dictionary with exception stats
         """
@@ -380,19 +396,18 @@ class ExceptionTracker:
             code: {
                 **stats,
                 "rate": (
-                    stats["count"]
-                    / (stats["last_seen"] - stats["first_seen"])
+                    stats["count"] / (stats["last_seen"] - stats["first_seen"])
                     if stats["first_seen"]
                     else 0
-                )
+                ),
             }
             for code, stats in self.exceptions.items()
         }
-        
+
     def clear(self) -> None:
         """Clear tracked exceptions."""
         self.exceptions.clear()
 
 
 # Global exception tracker
-exception_tracker = ExceptionTracker()
+# exception_tracker = ExceptionTracker()
