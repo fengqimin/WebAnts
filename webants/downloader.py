@@ -117,11 +117,15 @@ class Downloader(BaseDownloader):
             loop: Event loop to use
             **kwargs: Additional configuration parameters:
                 - delay: Default delay between requests (seconds)
-                - timeout: Default request timeout (seconds)
+                - timeout: Request timeout dict or float (seconds)
                 - retry_delay: Base delay for retry mechanism (seconds)
                 - headers: Custom HTTP headers
                 - cookies: Custom cookies
                 - encoding: Default response encoding
+                - limits: httpx.Limits configuration
+                - proxies: Proxy configuration
+                - follow_redirects: Whether to follow redirects
+                - http2: Whether to enable HTTP/2
         """
         super().__init__(request_queue=request_queue, response_queue=response_queue)
         self.logger = get_logger(self.__class__.__name__, log_level=log_level)
@@ -134,17 +138,25 @@ class Downloader(BaseDownloader):
             "retry_requests": 0,
             "total_retries": 0,
             "total_time": 0.0,
+            "min_response_time": float("inf"),
+            "max_response_time": 0.0,
+            "avg_response_time": 0.0,
         }
 
         # Configuration
         self.delay = kwargs.get("delay", 0)
-        self.timeout = kwargs.get("timeout", 30)
+        self.timeout = self._setup_timeout(kwargs.get("timeout", 30))
         self.default_encoding = kwargs.get("encoding", "utf-8")
-
+        self.follow_redirects = kwargs.get("follow_redirects", True)
+        
         # Event loop and client setup
         self.loop = self._setup_event_loop(loop)
         self.headers = self._setup_headers(kwargs.get("headers", {}))
         self.cookies = kwargs.get("cookies", {})
+        self.limits = self._setup_limits(kwargs.get("limits", {}))
+        self.proxies = kwargs.get("proxies")
+        self.http2 = kwargs.get("http2", False)
+        
         self.client = self._setup_http_client()
 
         # Concurrency control
@@ -155,6 +167,21 @@ class Downloader(BaseDownloader):
         # retry mechanism
         self.retry_delay = kwargs.get("retry_delay", 1)
         self.retry_requests = set()
+
+    def _setup_timeout(self, timeout: Union[float, dict]) -> httpx.Timeout:
+        """Setup request timeout configuration."""
+        if isinstance(timeout, (int, float)):
+            return httpx.Timeout(timeout)
+        return httpx.Timeout(**timeout)
+
+    def _setup_limits(self, limits: dict) -> httpx.Limits:
+        """Setup connection pool limits."""
+        defaults = {
+            "max_keepalive_connections": self.concurrency,
+            "max_connections": self.concurrency * 2,
+            "keepalive_expiry": 60.0,
+        }
+        return httpx.Limits(**{**defaults, **limits})
 
     def _setup_headers(self, headers: dict) -> dict:
         """Setup default headers with user agent if not provided."""
@@ -169,8 +196,11 @@ class Downloader(BaseDownloader):
         return httpx.AsyncClient(
             headers=self.headers,
             cookies=self.cookies,
-            timeout=httpx.Timeout(self.timeout),
-            http2=False,
+            timeout=self.timeout,
+            limits=self.limits,
+            proxies=self.proxies,
+            follow_redirects=self.follow_redirects,
+            http2=self.http2,
         )
 
     def _setup_event_loop(
@@ -217,7 +247,7 @@ class Downloader(BaseDownloader):
             )
 
             elapsed = time.time() - start_time
-            self.stats["total_time"] += elapsed
+            self._update_stats(elapsed)
 
             # Log detailed request information
             self.logger.info(
@@ -232,7 +262,7 @@ class Downloader(BaseDownloader):
 
         except httpx.HTTPError as e:
             elapsed = time.time() - start_time
-            self.stats["total_time"] += elapsed
+            self._update_stats(elapsed)
             self.stats["failed_requests"] += 1
 
             self.logger.error(
@@ -247,6 +277,15 @@ class Downloader(BaseDownloader):
             self.logger.error(f"Unexpected error: {str(e)}, {request}")
 
             return request
+
+    def _update_stats(self, elapsed: float) -> None:
+        """Update response time statistics."""
+        self.stats["total_time"] += elapsed
+        self.stats["min_response_time"] = min(self.stats["min_response_time"], elapsed)
+        self.stats["max_response_time"] = max(self.stats["max_response_time"], elapsed)
+        total_requests = self.stats["successful_requests"] + self.stats["failed_requests"]
+        if total_requests > 0:
+            self.stats["avg_response_time"] = self.stats["total_time"] / total_requests
 
     def _retry_request(self, request: Request) -> Request:
         """Retry a request by re-queuing it with adjusted priority."""

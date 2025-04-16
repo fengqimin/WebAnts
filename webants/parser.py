@@ -2,14 +2,16 @@
 This module provides HTML/XML parsing functionality with the following features:
 - Efficient parsing using lxml
 - CSS selector and XPath support
-- Caching mechanism for improved performance
-- Robust error handling
-- Response content encoding detection
+- Advanced caching mechanism using LRU cache
+- Robust error handling with recovery
+- Smart encoding detection
 """
 
 import functools
+import hashlib
 import logging
-from typing import Any, Callable, Optional, Union
+from typing import Any, Callable, Optional, Union, Dict
+from urllib.parse import urlparse
 
 from lxml import etree
 from lxml.html import HTMLParser, fromstring
@@ -19,41 +21,84 @@ from webants.utils.logger import get_logger
 
 
 class Parser:
-    """HTML/XML Parser with caching and error handling."""
+    """HTML/XML Parser with advanced caching and error handling."""
 
-    def __init__(self, encoding: str = "utf-8", log_level: int = logging.INFO):
+    def __init__(
+        self, 
+        encoding: str = "utf-8", 
+        log_level: int = logging.INFO,
+        cache_size: int = 1000,
+        max_document_size: int = 10 * 1024 * 1024  # 10MB
+    ):
         """Initialize the parser.
         
         Args:
             encoding: Default encoding for parsing
             log_level: Logging level
+            cache_size: Size of LRU cache for parsed documents
+            max_document_size: Maximum document size to parse in bytes
         """
         self.encoding = encoding
         self.logger = get_logger(self.__class__.__name__, log_level=log_level)
-        self._parser = HTMLParser(encoding=encoding)
-        self._cache = {}  # Simple memory cache
+        self._parser = HTMLParser(
+            encoding=encoding,
+            remove_blank_text=True,
+            remove_comments=True,
+            remove_pis=True
+        )
+        self.max_document_size = max_document_size
+        self._css_cache: Dict[str, Any] = {}
+        self._xpath_cache: Dict[str, Any] = {}
+        
+        # Statistics
         self.stats = {
             "total_parses": 0,
             "cache_hits": 0,
             "parse_errors": 0,
-            "encoding_errors": 0
+            "encoding_errors": 0,
+            "size_errors": 0,
+            "css_cache_hits": 0,
+            "xpath_cache_hits": 0,
+            "total_css_queries": 0,
+            "total_xpath_queries": 0,
         }
 
+    def _get_content_hash(self, content: Union[str, bytes]) -> str:
+        """Generate hash for content to use as cache key."""
+        if isinstance(content, str):
+            content = content.encode()
+        return hashlib.sha1(content).hexdigest()
+
     @functools.lru_cache(maxsize=1000)
-    def _cached_parse(self, content: str) -> etree.ElementBase:
+    def _cached_parse(self, content_hash: str, content: str) -> etree.ElementBase:
         """Parse HTML content with caching.
         
         Args:
+            content_hash: Hash of content for cache key
             content: HTML content to parse
             
         Returns:
             Parsed HTML tree
+            
+        Raises:
+            ParserError: If parsing fails
         """
         try:
+            if isinstance(content, bytes):
+                if len(content) > self.max_document_size:
+                    self.stats["size_errors"] += 1
+                    raise ParserError(
+                        f"Document size {len(content)} exceeds limit {self.max_document_size}"
+                    )
+            
             return fromstring(content, parser=self._parser)
+            
         except etree.ParserError as e:
             self.stats["parse_errors"] += 1
             raise ParserError(f"Failed to parse HTML: {str(e)}")
+        except Exception as e:
+            self.stats["parse_errors"] += 1
+            raise ParserError(f"Unexpected parsing error: {str(e)}")
 
     def parse(self, content: Union[str, bytes], encoding: Optional[str] = None) -> etree.ElementBase:
         """Parse HTML content with error handling.
@@ -77,22 +122,53 @@ class Parser:
                 self.stats["encoding_errors"] += 1
                 self.logger.warning(f"Encoding error: {str(e)}, trying to detect encoding...")
                 try:
-                    # Attempt to detect encoding
-                    import chardet
-                    detected = chardet.detect(content)
-                    if detected["confidence"] > 0.8:
-                        content = content.decode(detected["encoding"])
-                    else:
-                        raise ParserError("Could not detect content encoding")
+                    # Try common encodings first
+                    for enc in ['utf-8', 'latin1', 'cp1252', 'iso-8859-1']:
+                        try:
+                            content = content.decode(enc)
+                            self.logger.info(f"Successfully decoded with {enc}")
+                            break
+                        except UnicodeDecodeError:
+                            continue
+                    
+                    # If still not decoded, try chardet
+                    if isinstance(content, bytes):
+                        import chardet
+                        detected = chardet.detect(content)
+                        if detected["confidence"] > 0.8:
+                            content = content.decode(detected["encoding"])
+                            self.logger.info(f"Decoded with detected encoding {detected['encoding']}")
+                        else:
+                            raise ParserError(
+                                f"Could not detect content encoding (confidence: {detected['confidence']})"
+                            )
+                            
                 except ImportError:
                     self.logger.error("chardet not installed, cannot detect encoding")
                     raise ParserError("Failed to decode content and chardet not available")
 
         try:
-            return self._cached_parse(content)
+            content_hash = self._get_content_hash(content)
+            tree = self._cached_parse(content_hash, content)
+            self.stats["cache_hits"] += 1
+            return tree
+            
         except Exception as e:
             self.logger.error(f"Parsing error: {str(e)}")
             raise
+
+    def _get_cached_css(self, selector: str) -> Any:
+        """Get cached CSS selector."""
+        if selector not in self._css_cache:
+            from cssselect import CSSSelector
+            self._css_cache[selector] = CSSSelector(selector)
+        return self._css_cache[selector]
+
+    def _get_cached_xpath(self, xpath: str) -> Any:
+        """Get cached XPath expression."""
+        if xpath not in self._xpath_cache:
+            self._xpath_cache[xpath] = etree.XPath(xpath)
+        return self._xpath_cache[xpath]
 
     def css(self, tree: etree.ElementBase, selector: str) -> list:
         """Extract elements using CSS selector.
@@ -104,8 +180,11 @@ class Parser:
         Returns:
             List of matching elements
         """
+        self.stats["total_css_queries"] += 1
         try:
-            return tree.cssselect(selector)
+            css_selector = self._get_cached_css(selector)
+            self.stats["css_cache_hits"] += 1
+            return css_selector(tree)
         except Exception as e:
             self.logger.error(f"CSS selector error: {str(e)}")
             return []
@@ -114,14 +193,17 @@ class Parser:
         """Extract elements using XPath.
         
         Args:
-            tree: Parsed HTML tree
+            tree: Parsed HTML tree 
             xpath: XPath string
             
         Returns:
             List of matching elements
         """
+        self.stats["total_xpath_queries"] += 1
         try:
-            return tree.xpath(xpath)
+            xpath_expr = self._get_cached_xpath(xpath)
+            self.stats["xpath_cache_hits"] += 1
+            return xpath_expr(tree)
         except Exception as e:
             self.logger.error(f"XPath error: {str(e)}")
             return []
@@ -162,5 +244,14 @@ class Parser:
         """
         return {
             **self.stats,
-            "cache_info": self._cached_parse.cache_info()._asdict()
+            "cache_info": self._cached_parse.cache_info()._asdict(),
+            "css_cache_size": len(self._css_cache),
+            "xpath_cache_size": len(self._xpath_cache)
         }
+
+    def clear_caches(self) -> None:
+        """Clear all parser caches."""
+        self._cached_parse.cache_clear()
+        self._css_cache.clear()
+        self._xpath_cache.clear()
+        self.logger.info("All parser caches cleared")

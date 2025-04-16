@@ -1,47 +1,24 @@
-# -*- coding: utf-8 -*-
-"""Request
-   A request message from a client to a server includes, within the
-   first line of that message, the method to be applied to the resource,
-   the identifier of the resource, and the protocol version in use.
+"""Request Module
 
-       Request       = Request-Line              ; Section 5.1
-                       *(( general-header        ; Section 4.5
-                        | request-header         ; Section 5.3
-                        | entity-header ) CRLF)  ; Section 7.1
-                       CRLF
-                       [ message-body ]          ; Section 4.3
+This module provides a robust Request class with:
+- Middleware integration
+- Request lifecycle hooks
+- Customizable request attributes
+- Validation and error handling
+- Priority queueing support
+"""
 
-       Request-Line   = Method SP Request-URI SP HTTP-Version CRLF
-
-       request-header = Accept                   ; Section 14.1
-                      | Accept-Charset           ; Section 14.2
-                      | Accept-Encoding          ; Section 14.3
-                      | Accept-Language          ; Section 14.4
-                      | Authorization            ; Section 14.8
-                      | Expect                   ; Section 14.20
-                      | From                     ; Section 14.22
-                      | Host                     ; Section 14.23
-                      | If-Match                 ; Section 14.24
-                      | If-Modified-Since        ; Section 14.25
-                      | If-None-Match            ; Section 14.26
-                      | If-Range                 ; Section 14.27
-                      | If-Unmodified-Since      ; Section 14.28
-                      | Max-Forwards             ; Section 14.31
-                      | Proxy-Authorization      ; Section 14.34
-                      | Range                    ; Section 14.35
-                      | Referer                  ; Section 14.36
-                      | TE                       ; Section 14.39
-                      | User-Agent               ; Section 14.43
-
- """
-
+import asyncio
 from asyncio import iscoroutinefunction
-from typing import Callable, Final
+from typing import Any, Callable, Dict, Optional, Union, List
+from urllib.parse import urlparse, urlunparse
 
 from webants.libs.exceptions import InvalidRequestMethod
 from webants.utils.url import normalize_url
 
 DEFAULT_REQUEST_HEADERS = {
+    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+    "Accept-Language": "en",
     "Accept-Encoding": "gzip, deflate",
     "Connection": "keep-alive",
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:106.0) Gecko/20100101 Firefox/106.0",
@@ -49,147 +26,273 @@ DEFAULT_REQUEST_HEADERS = {
 
 
 class Request:
-    """HTTP Request class"""
+    """Enhanced HTTP Request class."""
 
-    METHOD: Final[set] = {"GET", "HEAD", "POST"}
+    METHODS: set[str] = {"GET", "HEAD", "POST", "PUT", "DELETE", "OPTIONS", "PATCH"}
+    count: int = 0  # Class-level counter for request tracking
 
     __slots__ = (
         "url",
         "method",
         "headers",
-        "referer",
+        "body",
+        "cookies",
+        "encoding",
         "callback",
+        "errback",
         "cb_kwargs",
+        "dont_filter",
+        "priority",
+        "retries",
         "delay",
         "timeout",
-        "retries",
-        "priority",
-        "unique",
+        "meta",
+        "referer",
+        "_middlewares",
+        "_validate",
+        "_normalize"
     )
-    count: int = 0
 
     def __init__(
         self,
         url: str,
         *,
         method: str = "GET",
-        headers: dict = None,
-        referer: "Request" = None,
-        callback: Callable = None,
-        cb_kwargs: dict = None,
-        delay: float = 0.00,
-        timeout: float = 20.0,
-        retries: int = 3,
+        headers: Optional[Dict] = None,
+        body: Optional[Union[str, bytes, Dict]] = None,
+        cookies: Optional[Dict] = None,
+        encoding: str = "utf-8",
+        callback: Optional[Callable] = None,
+        errback: Optional[Callable] = None,
+        cb_kwargs: Optional[Dict] = None,
+        dont_filter: bool = False,
         priority: int = 0,
-        unique: bool = True,
+        retries: int = 3,
+        delay: float = 0.0,
+        timeout: Optional[float] = None,
+        meta: Optional[Dict] = None,
+        referer: Optional["Request"] = None,
+        validate: bool = True,
+        normalize: bool = True,
     ):
-        """Initialize a Request object
+        """Initialize a Request object.
         
         Args:
             url: Target URL
-            method: Request method, must be one of METHOD
+            method: HTTP method, must be one of METHODS
             headers: Request headers
-            referer: Request source URL, refers to the Request of the current page
-            callback: Callback function
-            cb_kwargs: Callback function keyword arguments 
-            delay: Delay time in seconds
-            timeout: Request timeout in seconds
-            retries: Number of retries
-            priority: Priority, lower number means higher priority
-            unique: Whether the request should be unique, defaults to True
+            body: Request body
+            cookies: Request cookies
+            encoding: Request encoding
+            callback: Success callback function
+            errback: Error callback function
+            cb_kwargs: Callback keyword arguments
+            dont_filter: Whether to skip duplicate filtering
+            priority: Request priority (lower = higher priority)
+            retries: Number of retries allowed
+            delay: Delay before sending request
+            timeout: Request timeout
+            meta: Additional metadata
+            referer: Referring request
+            validate: Whether to validate the request
+            normalize: Whether to normalize the URL
         """
-
-        if not isinstance(url, str):
-            raise TypeError(f"url must be str objects, got {url.__class__.__name__}")
-
-        self.url = url
-        self.method: str = method.upper()
-
-        if self.method not in self.METHOD:
-            raise InvalidRequestMethod(f"'{self.method}' method is not supported.")
-
-        self.headers: dict = headers or DEFAULT_REQUEST_HEADERS
-
-        self.referer: Request = referer
-        # Callback function and arguments
-        self.callback = callback
-        if self.callback:
+        if validate:
+            self._validate_method(method)
+            self._validate_url(url)
+            
+        self.url = normalize_url(url) if normalize else url
+        self.method = method.upper()
+        self.headers = {**DEFAULT_REQUEST_HEADERS, **(headers or {})}
+        self.body = body
+        self.cookies = cookies or {}
+        self.encoding = encoding
+        
+        # Validation for callback functions
+        if callback:
             assert iscoroutinefunction(callback), (
                 f"callback must be a coroutine function, got {callback.__name__}"
-            )     
+            )
+        if errback:
+            assert iscoroutinefunction(errback), (
+                f"errback must be a coroutine function, got {errback.__name__}"
+            )
+            
+        self.callback = callback
+        self.errback = errback
         self.cb_kwargs = cb_kwargs or {}
-        # Request configuration
+        
+        # Request behavior configuration
+        self.dont_filter = dont_filter
         self.priority = priority
         self.retries = retries
-        self.timeout = timeout
         self.delay = delay
-        self.unique = unique
+        self.timeout = timeout
+        
+        # Additional metadata
+        self.meta = meta or {}
+        self.referer = referer
+        
+        # Track request count
         Request.count += 1
+        
+        # Initialize middleware list
+        self._middlewares = []
+        self._validate = validate
+        self._normalize = normalize
 
-    def __repr__(self):
-        return f"<Request('{self.method}', '{self.url}')[{self.priority}]>"
-
-    def __lt__(self, other):
-        """Rich comparison method.
-        x<y calls x.__lt__(y)
-        x<=y calls x.__le__(y)
-        x==y calls x.__eq__(y)
-        x!=y calls x.__ne__(y)
-        x>y calls x.__gt__(y)
-        x>=y calls x.__ge__(y).
+    def _validate_method(self, method: str) -> None:
+        """Validate HTTP method.
+        
+        Args:
+            method: HTTP method to validate
+            
+        Raises:
+            InvalidRequestMethod: If method is not supported
         """
-        assert isinstance(other, Request)
-        return self.url < other.url
+        if method.upper() not in self.METHODS:
+            raise InvalidRequestMethod(f"'{method}' method is not supported")
 
-    def __gt__(self, other):
-        assert isinstance(other, Request)
-        return self.url > other.url
+    def _validate_url(self, url: str) -> None:
+        """Validate URL format.
+        
+        Args:
+            url: URL to validate
+            
+        Raises:
+            ValueError: If URL is invalid
+        """
+        if not isinstance(url, str):
+            raise TypeError(f"url must be str, got {url.__class__.__name__}")
+            
+        parsed = urlparse(url)
+        if not all([parsed.scheme, parsed.netloc]):
+            raise ValueError(f"Invalid URL: {url}")
 
-    def __eq__(self, other):
-        assert isinstance(other, Request)
+    def __repr__(self) -> str:
+        """String representation."""
+        return f"<Request [{self.method}] {self.url}>"
+
+    def __lt__(self, other: "Request") -> bool:
+        """Compare requests by priority."""
+        return self.priority < other.priority
+
+    def __eq__(self, other: object) -> bool:
+        """Compare requests for equality."""
+        if not isinstance(other, Request):
+            return NotImplemented
         return self.fingerprint() == other.fingerprint()
 
-    def __hash__(self):
-        # return self.fingerprint()
-        return hash(id(self))
+    def __hash__(self) -> int:
+        """Hash for request deduplication."""
+        return hash(self.fingerprint())
 
     def fingerprint(
         self,
         *,
-        algorithm_name: str = "sha1",
-        keep_auth: bool = False,
-        keep_blank_values: bool = True,
-        keep_default_port: bool = False,
         keep_fragments: bool = False,
-        sort_query: bool = True,
-    ) -> bytes:
-        """Calculate the fingerprint (hash value) of the request using the specified hash algorithm
-
-
+        keep_auth: bool = False,
+        normalize: bool = True
+    ) -> str:
+        """Generate unique fingerprint for request.
+        
         Args:
-            algorithm_name: Name of the hash algorithm, defaults to sha1
-            keep_auth: Whether to retain authentication information, defaults to False to ensure hash consistency across users
-            keep_fragments: Whether to retain fragments, defaults to False to ensure hash consistency across fragments
-            keep_blank_values: Whether to retain blank query values, defaults to True
-            keep_default_port: Whether to retain the default port, defaults to False
-            sort_query: Whether to sort query parameters, defaults to True to ensure hash consistency across parameter order
-
+            keep_fragments: Whether to keep URL fragments
+            keep_auth: Whether to keep authentication info
+            normalize: Whether to normalize the URL
+            
         Returns:
-            The fingerprint (hash value) of the request
+            Request fingerprint string
         """
-        import hashlib
+        # Create parts list for fingerprint
+        parts = [
+            self.method,
+            normalize_url(
+                self.url,
+                keep_fragments=keep_fragments,
+                keep_auth=keep_auth,
+                normalize=normalize
+            )
+        ]
+        
+        # Add body to fingerprint if present
+        if self.body:
+            if isinstance(self.body, (str, bytes)):
+                parts.append(str(self.body))
+            else:
+                # For dict/json bodies, sort keys for consistency
+                parts.append(str(sorted(self.body.items())))
+                
+        return ":".join(parts)
 
-        # Start calculating the hash value
-        fp = hashlib.new(algorithm_name, self.method.encode())
+    def copy(self, **kwargs: Any) -> "Request":
+        """Create copy of request with optional modifications.
+        
+        Args:
+            **kwargs: Attributes to override
+            
+        Returns:
+            New Request instance
+        """
+        # Start with current attributes
+        new_kwargs = {
+            "url": self.url,
+            "method": self.method,
+            "headers": self.headers.copy(),
+            "body": self.body,
+            "cookies": self.cookies.copy(),
+            "encoding": self.encoding,
+            "callback": self.callback,
+            "errback": self.errback,
+            "cb_kwargs": self.cb_kwargs.copy(),
+            "dont_filter": self.dont_filter,
+            "priority": self.priority,
+            "retries": self.retries,
+            "delay": self.delay,
+            "timeout": self.timeout,
+            "meta": self.meta.copy(),
+            "referer": self.referer,
+            "validate": self._validate,
+            "normalize": self._normalize
+        }
+        
+        # Override with provided kwargs
+        new_kwargs.update(kwargs)
+        
+        return Request(**new_kwargs)
 
-        url = normalize_url(
-            url=self.url,
-            keep_auth=keep_auth,
-            keep_blank_values=keep_blank_values,
-            keep_default_port=keep_default_port,
-            keep_fragments=keep_fragments,
-            sort_query=sort_query,
-        )
-        fp.update(url.encode())
+    def replace(self, *args: Any, **kwargs: Any) -> "Request":
+        """Replace request attributes in place.
+        
+        Args:
+            **kwargs: Attributes to replace
+            
+        Returns:
+            Self for chaining
+        """
+        for k, v in kwargs.items():
+            if not hasattr(self, k):
+                raise AttributeError(f"Request has no attribute '{k}'")
+            setattr(self, k, v)
+        return self
+        
+    async def prepare(self) -> None:
+        """Prepare request before sending.
+        
+        This runs any registered middleware and performs final validation.
+        """
+        for middleware in self._middlewares:
+            try:
+                await middleware.process_request(self)
+            except Exception as e:
+                if self.errback:
+                    await self.errback(e, self)
+                raise
 
-        return fp.digest()
+    def add_middleware(self, middleware: Any) -> None:
+        """Add middleware to request processing chain.
+        
+        Args:
+            middleware: Middleware instance to add
+        """
+        self._middlewares.append(middleware)

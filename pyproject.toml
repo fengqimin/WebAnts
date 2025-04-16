@@ -1,7 +1,7 @@
 [project]
 name = "webants"
 version = "0.1.0"
-description = "Add your description here"
+description = "A simple asynchronous web crawler framework implemented using httpx"
 readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
@@ -13,10 +13,24 @@ dependencies = [
     "playwright>=1.51.0",
     "setuptools>=75.6.0",
     "ujson>=5.10.0",
+    "chardet>=5.2.0",  # Added for encoding detection
 ]
 
-[dependency-groups]
+[project.optional-dependencies]
 dev = [
     "ipython>=9.0.2",
     "pip>=24.3.1",
+    "black>=24.2.0",  # Code formatting
+    "isort>=5.13.0",  # Import sorting
+    "pytest>=8.0.0",  # Testing
+    "pytest-asyncio>=0.23.0",  # Async testing
 ]
+
+[tool.black]
+line-length = 100
+target-version = ["py311"]
+
+[tool.isort]
+profile = "black"
+line_length = 100
+multi_line_output = 3
