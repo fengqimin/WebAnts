@@ -154,8 +154,7 @@ class Downloader(BaseDownloader):
         self.sem = asyncio.Semaphore(concurrency)
         self.kwargs = kwargs
 
-        # Event loop and client setup
-        self.loop = self._setup_event_loop(loop)
+        # client setup
         self.headers = self._setup_headers(kwargs.get("headers", {}))
         self.cookies = kwargs.get("cookies", {})
         self.limits = self._setup_limits(kwargs.get("limits", {}))
@@ -202,23 +201,6 @@ class Downloader(BaseDownloader):
             follow_redirects=self.follow_redirects,
             http2=self.http2,
         )
-
-    def _setup_event_loop(
-        self, loop: Optional[asyncio.AbstractEventLoop]
-    ) -> asyncio.AbstractEventLoop:
-        """Setup and return event loop."""
-        if loop:
-            self._close_loop = False
-            return loop
-
-        try:
-            loop = asyncio.get_running_loop()
-            self._close_loop = False
-        except RuntimeError:
-            loop = asyncio.new_event_loop()
-            asyncio.set_event_loop(loop)
-            self._close_loop = True
-        return loop
 
     async def _fetch(self, request: Request) -> Union[httpx.Response, Request]:
         """Fetch a resource based on the request with advanced error handling.
@@ -347,9 +329,8 @@ class Downloader(BaseDownloader):
                         f"Delay: {backoff_delay:.2f}s"
                     )
 
-                    return None
-                else:
-                    return None
+                return None
+
             # Handle successful response
             if request.callback is None:
                 return result
@@ -358,10 +339,7 @@ class Downloader(BaseDownloader):
         # Handle request exception triggered retries
         elif isinstance(result, Request):
             if request.retries > 0:
-                request.retries -= 1
-                request.priority += 10  # Lower priority for retry requests
-
-                self.request_queue.put_nowait((request.priority, request))
+                request = self._retry_request(request)
 
                 self.logger.warning(
                     f"Request failed, retrying : {request}, "
@@ -374,6 +352,7 @@ class Downloader(BaseDownloader):
                 self.logger.error(
                     f"Request finally failed: {request}, Retries exhausted"
                 )
+                self.stats["failed_requests"] += 1
                 return httpx.Response(
                     status_code=600,  # Custom status code indicating retry failure
                     extensions={"Request": request, "retry_exhausted": True},
@@ -422,14 +401,8 @@ class Downloader(BaseDownloader):
             __ = [asyncio.create_task(self.start_worker()) for _ in range(many)]
             await self.request_queue.join()
 
-            # async with asyncio.TaskGroup() as tg:
-            #      __ = [tg.create_task(self.start_worker()) for _ in range(many)]
-
         except Exception as e:
             raise e
-
-    def stop(self) -> None:
-        self.logger.debug(f"{self.__class__.__name__} already stopped.")
 
     async def close(self) -> None:
         await self.client.aclose()

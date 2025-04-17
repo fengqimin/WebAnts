@@ -11,7 +11,6 @@ import functools
 import hashlib
 import logging
 from typing import Any, Callable, Optional, Union, Dict
-from urllib.parse import urlparse
 
 from lxml import etree
 from lxml.html import HTMLParser, fromstring
@@ -133,7 +132,8 @@ class Parser:
                     
                     # If still not decoded, try chardet
                     if isinstance(content, bytes):
-                        import chardet
+                        import charset_normalizer as chardet
+
                         detected = chardet.detect(content)
                         if detected["confidence"] > 0.8:
                             content = content.decode(detected["encoding"])
