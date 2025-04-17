@@ -31,8 +31,27 @@ multi_line_output = 3
 
 [tool.pytest.ini_options]
 # Disable warnings system because it interferes with the logger warning capture.
-asyncio_mode = "auto"
 asyncio_default_fixture_loop_scope = "function"
+testpaths = "tests"
+python_files = "test_*.py"
+python_classes = "Test*"
+python_functions = "test_*"
+addopts = [
+    "--asyncio-mode=auto",  
+    "--cov-report=term-missing"  
+]
+
+markers = [
+    "slow: marks tests as slow (deselect with '-m \"not slow\"')",
+    "integration: marks tests as integration tests",
+    "unit: marks tests as unit tests"
+]
+
+# Configure logging during tests
+log_cli = "True"
+log_cli_level = "INFO"
+log_cli_format = "%(asctime)s [%(levelname)8s] %(message)s (%(filename)s:%(lineno)s)"
+log_cli_date_format = "%Y-%m-%d %H:%M:%S"
 
 [dependency-groups]
 dev = [
