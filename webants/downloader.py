@@ -435,3 +435,7 @@ class Downloader(BaseDownloader):
         await self.client.aclose()
 
         self.logger.info(f"{self.__class__.__name__} has been closed.")
+
+    def get_stsats(self) -> dict[str, int | float]:
+        """Get downloader statistics."""
+        return self.stats.copy()
