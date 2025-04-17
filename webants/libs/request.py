@@ -8,10 +8,9 @@ This module provides a robust Request class with:
 - Priority queueing support
 """
 
-import asyncio
 from asyncio import iscoroutinefunction
-from typing import Any, Callable, Dict, Optional, Union, List
-from urllib.parse import urlparse, urlunparse
+from typing import Any, Callable, Dict, Optional, Union
+from urllib.parse import urlparse
 
 from webants.libs.exceptions import InvalidRequestMethod
 from webants.utils.url import normalize_url
@@ -50,7 +49,7 @@ class Request:
         "referer",
         "_middlewares",
         "_validate",
-        "_normalize"
+        "_normalize",
     )
 
     def __init__(
@@ -73,10 +72,10 @@ class Request:
         meta: Optional[Dict] = None,
         referer: Optional["Request"] = None,
         validate: bool = True,
-        normalize: bool = True,
+        normalize: bool = False,
     ):
         """Initialize a Request object.
-        
+
         Args:
             url: Target URL
             method: HTTP method, must be one of METHODS
@@ -100,14 +99,14 @@ class Request:
         if validate:
             self._validate_method(method)
             self._validate_url(url)
-            
+
         self.url = normalize_url(url) if normalize else url
         self.method = method.upper()
         self.headers = {**DEFAULT_REQUEST_HEADERS, **(headers or {})}
         self.body = body
         self.cookies = cookies or {}
         self.encoding = encoding
-        
+
         # Validation for callback functions
         if callback:
             assert iscoroutinefunction(callback), (
@@ -117,25 +116,25 @@ class Request:
             assert iscoroutinefunction(errback), (
                 f"errback must be a coroutine function, got {errback.__name__}"
             )
-            
+
         self.callback = callback
         self.errback = errback
         self.cb_kwargs = cb_kwargs or {}
-        
+
         # Request behavior configuration
         self.dont_filter = dont_filter
         self.priority = priority
         self.retries = retries
         self.delay = delay
         self.timeout = timeout
-        
+
         # Additional metadata
         self.meta = meta or {}
         self.referer = referer
-        
+
         # Track request count
         Request.count += 1
-        
+
         # Initialize middleware list
         self._middlewares = []
         self._validate = validate
@@ -143,10 +142,10 @@ class Request:
 
     def _validate_method(self, method: str) -> None:
         """Validate HTTP method.
-        
+
         Args:
             method: HTTP method to validate
-            
+
         Raises:
             InvalidRequestMethod: If method is not supported
         """
@@ -155,16 +154,16 @@ class Request:
 
     def _validate_url(self, url: str) -> None:
         """Validate URL format.
-        
+
         Args:
             url: URL to validate
-            
+
         Raises:
             ValueError: If URL is invalid
         """
         if not isinstance(url, str):
             raise TypeError(f"url must be str, got {url.__class__.__name__}")
-            
+
         parsed = urlparse(url)
         if not all([parsed.scheme, parsed.netloc]):
             raise ValueError(f"Invalid URL: {url}")
@@ -175,7 +174,7 @@ class Request:
 
     def __lt__(self, other: "Request") -> bool:
         """Compare requests by priority."""
-        return self.priority < other.priority
+        return not self.priority < other.priority
 
     def __eq__(self, other: object) -> bool:
         """Compare requests for equality."""
@@ -192,15 +191,15 @@ class Request:
         *,
         keep_fragments: bool = False,
         keep_auth: bool = False,
-        normalize: bool = True
+        sort_query: bool = True,
     ) -> str:
         """Generate unique fingerprint for request.
-        
+
         Args:
             keep_fragments: Whether to keep URL fragments
             keep_auth: Whether to keep authentication info
             normalize: Whether to normalize the URL
-            
+
         Returns:
             Request fingerprint string
         """
@@ -211,9 +210,10 @@ class Request:
                 self.url,
                 keep_fragments=keep_fragments,
                 keep_auth=keep_auth,
-            )
+                sort_query=sort_query,
+            ),
         ]
-        
+
         # Add body to fingerprint if present
         if self.body:
             if isinstance(self.body, (str, bytes)):
@@ -221,15 +221,15 @@ class Request:
             else:
                 # For dict/json bodies, sort keys for consistency
                 parts.append(str(sorted(self.body.items())))
-                
+
         return ":".join(parts)
 
     def copy(self, **kwargs: Any) -> "Request":
         """Create copy of request with optional modifications.
-        
+
         Args:
             **kwargs: Attributes to override
-            
+
         Returns:
             New Request instance
         """
@@ -252,20 +252,20 @@ class Request:
             "meta": self.meta.copy(),
             "referer": self.referer,
             "validate": self._validate,
-            "normalize": self._normalize
+            "normalize": self._normalize,
         }
-        
+
         # Override with provided kwargs
         new_kwargs.update(kwargs)
-        
+
         return Request(**new_kwargs)
 
     def replace(self, *args: Any, **kwargs: Any) -> "Request":
         """Replace request attributes in place.
-        
+
         Args:
             **kwargs: Attributes to replace
-            
+
         Returns:
             Self for chaining
         """
@@ -274,10 +274,10 @@ class Request:
                 raise AttributeError(f"Request has no attribute '{k}'")
             setattr(self, k, v)
         return self
-        
+
     async def prepare(self) -> None:
         """Prepare request before sending.
-        
+
         This runs any registered middleware and performs final validation.
         """
         for middleware in self._middlewares:
@@ -290,7 +290,7 @@ class Request:
 
     def add_middleware(self, middleware: Any) -> None:
         """Add middleware to request processing chain.
-        
+
         Args:
             middleware: Middleware instance to add
         """
