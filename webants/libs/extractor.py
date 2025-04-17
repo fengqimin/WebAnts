@@ -23,6 +23,7 @@ __all__ = [
     "extract_text",
     "get_base_url",
     "get_html_title",
+    
     "ExtractorFactory",  # Extractor factory class
     "BaseExtractor",  # Base Extractor class
     #

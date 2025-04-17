@@ -18,6 +18,8 @@ from lxml.html import HTMLParser, fromstring
 from webants.libs.exceptions import ParserError
 from webants.utils.logger import get_logger
 
+# Size of LRU cache for parsed documents
+lru_cache_limit: int = 1000
 
 class Parser:
     """HTML/XML Parser with advanced caching and error handling."""
@@ -26,7 +28,7 @@ class Parser:
         self, 
         encoding: str = "utf-8", 
         log_level: int = logging.INFO,
-        cache_size: int = 1000,
+
         max_document_size: int = 10 * 1024 * 1024  # 10MB
     ):
         """Initialize the parser.
@@ -34,11 +36,12 @@ class Parser:
         Args:
             encoding: Default encoding for parsing
             log_level: Logging level
-            cache_size: Size of LRU cache for parsed documents
             max_document_size: Maximum document size to parse in bytes
         """
         self.encoding = encoding
         self.logger = get_logger(self.__class__.__name__, log_level=log_level)
+        self.cache_size = lru_cache_limit
+
         self._parser = HTMLParser(
             encoding=encoding,
             remove_blank_text=True,
@@ -68,7 +71,7 @@ class Parser:
             content = content.encode()
         return hashlib.sha1(content).hexdigest()
 
-    @functools.lru_cache(maxsize=1000)
+    @functools.lru_cache(maxsize=lru_cache_limit)
     def _cached_parse(self, content_hash: str, content: str) -> etree.ElementBase:
         """Parse HTML content with caching.
         
@@ -121,16 +124,7 @@ class Parser:
                 self.stats["encoding_errors"] += 1
                 self.logger.warning(f"Encoding error: {str(e)}, trying to detect encoding...")
                 try:
-                    # Try common encodings first
-                    for enc in ['utf-8', 'latin1', 'cp1252', 'iso-8859-1']:
-                        try:
-                            content = content.decode(enc)
-                            self.logger.info(f"Successfully decoded with {enc}")
-                            break
-                        except UnicodeDecodeError:
-                            continue
-                    
-                    # If still not decoded, try chardet
+                    # try chardet
                     if isinstance(content, bytes):
                         import charset_normalizer as chardet
 
