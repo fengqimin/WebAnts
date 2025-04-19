@@ -93,14 +93,15 @@ class Parser:
                 raise ParserError(
                     f"Document size {len(content)} exceeds limit {self.max_document_size}"
                 )
-
             return fromstring(content, parser=self._parser)
 
         except etree.ParserError as e:
             self.stats["parse_errors"] += 1
+            self.logger.error(f"HTML parsing error: {str(e)}")
             raise ParserError(f"Failed to parse HTML: {str(e)}")
         except Exception as e:
             self.stats["parse_errors"] += 1
+            self.logger.error(f"Unexpected parsing error: {str(e)}")
             raise ParserError(f"Unexpected parsing error: {str(e)}")
 
     def parse(
@@ -123,6 +124,7 @@ class Parser:
         if isinstance(content, bytes):
             try:
                 content = content.decode(encoding or self.encoding)
+                self.logger.debug(f"Decoded content with encoding {encoding}")
             except UnicodeDecodeError as e:
                 self.stats["encoding_errors"] += 1
                 self.logger.warning(
@@ -152,6 +154,7 @@ class Parser:
 
         try:
             content_hash = self._get_content_hash(content)
+            self.logger.debug(f"Content hash: {content_hash}")
             tree = self._cached_parse(content_hash, content)
             self.stats["cache_hits"] += 1
             return tree
@@ -166,7 +169,7 @@ class Parser:
             self._css_cache[selector] = CSSSelector(selector)
         return self._css_cache[selector]
 
-    def _get_cached_xpath(self, xpath: str) -> Any:
+    def _get_cached_xpath(self, xpath: str) -> etree.XPath:
         """Get cached XPath expression."""
         if xpath not in self._xpath_cache:
             self._xpath_cache[xpath] = etree.XPath(xpath)
@@ -212,7 +215,7 @@ class Parser:
 
     def extract(
         self,
-        content: Union[str, bytes],
+        content: Union[str, bytes, etree.ElementBase],
         extractor: Union[str, Callable],
         encoding: Optional[str] = None,
     ) -> Any:
@@ -226,7 +229,7 @@ class Parser:
         Returns:
             Extracted data
         """
-        tree = self.parse(content, encoding)
+        tree = self.parse(content, encoding) if isinstance(content, (str, bytes)) else content
 
         if isinstance(extractor, str):
             if extractor.startswith("//"):
