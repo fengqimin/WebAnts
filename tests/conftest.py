@@ -2,7 +2,7 @@ import sys
 from pathlib import Path
 import pytest
 import httpx
-from typing import AsyncGenerator, Generator, LiteralString
+from typing import AsyncGenerator,LiteralString
 
 # Add project root to Python path
 root_dir = str(Path(__file__).parent.parent.resolve())
