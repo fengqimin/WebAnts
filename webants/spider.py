@@ -8,10 +8,8 @@ This module provides the base Spider class with the following features:
 """
 
 import asyncio
-import inspect
 import logging
 import time
-import random
 from typing import Any, AsyncGenerator, Dict, List, Optional, Set, Union, Callable
 from collections import defaultdict
 
