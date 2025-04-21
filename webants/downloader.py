@@ -400,7 +400,11 @@ class Downloader(BaseDownloader):
         try:
             __ = [asyncio.create_task(self.start_worker()) for _ in range(many)]
             await self.request_queue.join()
-
+            for task in asyncio.all_tasks():
+                if task is not asyncio.current_task():
+                    task.cancel()
+        except asyncio.CancelledError:
+            self.logger.info(f"{self.__class__.__name__} has been cancelled.")
         except Exception as e:
             raise e
 
