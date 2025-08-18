@@ -12,6 +12,7 @@ from webants.utils.logger import get_logger
 from webants.utils.misc import args_to_list
 from webants.utils.url import lenient_host, normalize_url
 
+
 __all__ = [
     "Link",
     # Functions
@@ -23,10 +24,8 @@ __all__ = [
     "extract_text",
     "get_base_url",
     "get_html_title",
-    
     "ExtractorFactory",  # Extractor factory class
     "BaseExtractor",  # Base Extractor class
-    #
     "AttribExtractor",
     "LinkExtractor",
     "ElementExtractor",
@@ -34,9 +33,7 @@ __all__ = [
     "FilteringLinkExtractor",
 ]
 
-_ET = TypeVar(
-    "_ET", "ElementExtractor", "LinkExtractor", "TextExtractor"
-)
+_ET = TypeVar("_ET", "ElementExtractor", "LinkExtractor", "TextExtractor")
 
 
 class Link:
@@ -420,7 +417,9 @@ class ExtractorFactory:
     """Extractor factory class"""
 
     __slots__ = ()
-    extractors: dict[str, _ET] = dict()  # Record specific classes through metaclass
+    extractors: dict[str, "BaseExtractor"] = (
+        dict()
+    )  # Record specific classes through metaclass
     _instance = None
 
     def __new__(cls, *args, **kwargs):
@@ -433,7 +432,7 @@ class ExtractorFactory:
         cls.extractors[name] = obj
 
     @classmethod
-    def create_extractor(cls, cls_name: str) -> Type["_LxmlElementExtractor"]:
+    def create_extractor(cls, cls_name: str) -> Type["BaseExtractor"]:
         # extractor = cls.extractors.get(cls_name)
         for k in cls.extractors.keys():
             if k.lower().startswith(cls_name.lower()):
@@ -732,7 +731,7 @@ class TextExtractor(_LxmlElementExtractor):
         iter_text: bool = True,
         selector: str = None,
         xpath: str = None,
-        tags: Sequence[str] | str = None,
+        tags: Sequence[str] | str = "p",
         attr: str = None,
         many: bool = True,
         **kwargs,
@@ -952,5 +951,5 @@ class FilteringLinkExtractor(BaseExtractor):
 
 
 class RegexExtractor(BaseExtractor):
-    def extract(self, html: etree._Element | str) -> list[Any]:
+    def extract(self, html: str) -> list[Any]:
         pass

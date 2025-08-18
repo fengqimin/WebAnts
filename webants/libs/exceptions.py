@@ -16,6 +16,7 @@ __all__ = [
     "ConnectionError",
     "ExceptionTracker",
     "ExtractorError",
+    "InvalidExtractor",
     "InvalidRequestMethod",
     "InvalidSelector",
     "InvalidURL",
