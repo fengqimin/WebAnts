@@ -1,6 +1,6 @@
 [project]
 name = "webants"
-version = "0.1.0"
+version = "0.1.1"
 description = "A simple asynchronous web crawler framework implemented using httpx"
 readme = "README.md"
 requires-python = ">=3.12"

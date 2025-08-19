@@ -1,8 +1,10 @@
 from typing import Sequence, Callable
 
+
 import lxml.etree
 
-from webants.libs import (
+
+from webants.libs.extractor import (
     Link,
     ExtractorFactory,
     BaseExtractor,
@@ -10,12 +12,14 @@ from webants.libs import (
     FilteringLinkExtractor,
     ElementExtractor,
 )
+
 from webants.utils.logger import get_logger
+
 
 mod_logger = get_logger("Item", log_level=20)
 
+
 __all__ = [
-    "Item",
     "AttrItem",
     "ElementItem",
     "LinkItem",
@@ -32,10 +36,14 @@ __all__ = [
 class ExtractorDescriptor:
     """Descriptor class
 
+
     Manages access to Extractor instance data, directly returns extract results.
+
     https://docs.python.org/zh-cn/3.10/howto/descriptor.html
 
+
     Descriptors only work when used as class variables. They become ineffective when put into instances.
+
     """
 
     def __set_name__(self, owner, name):
@@ -47,7 +55,7 @@ class ExtractorDescriptor:
         Args:
             instance: The instance
             owner: The owner class
-            
+
         Returns:
             The extraction result
         """
@@ -59,24 +67,27 @@ class ExtractorDescriptor:
         return extractor.extract(instance.html)
 
     def __set__(self, instance, value):
-        assert isinstance(
-            value, BaseExtractor
-        ), f"Expected class <Extractor>, got {value.__class__.__name__}"
+        assert isinstance(value, BaseExtractor), (
+            f"Expected class <Extractor>, got {value.__class__.__name__}"
+        )
+
         setattr(instance, self._name, value)
 
 
-class Item:
+class _Item:
     """Item base class
-
+    Provides a common interface for all item types.
     Uses Extractor class to get Items from HTML
     """
 
     # Data descriptor
     field = ExtractorDescriptor()
-    html: str = ""
+
+    def __init__(self, html: str):
+        self.html: str = html
 
 
-class AttrItem(Item):
+class AttrItem(_Item):
     def __init__(
         self,
         attr: str,
@@ -84,13 +95,15 @@ class AttrItem(Item):
         xpath: str = None,
         tags: Sequence[str] | str = None,
         many: bool = True,
+        html: str | None = None,
     ):
+        super().__init__(html=html)  # Initialize with None, will be set later
         self.field = AttribExtractor(
             attr=attr, selector=selector, xpath=xpath, tags=tags, many=many
         )
 
 
-class LinkItem(Item):
+class LinkItem(_Item):
     def __init__(
         self,
         selector: str = None,
@@ -112,7 +125,10 @@ class LinkItem(Item):
         log_level: int = 20,
         many: bool = True,
         unique: bool = True,
+        html: str | None = None,
     ):
+        super().__init__(html=html)
+
         self.field = FilteringLinkExtractor(
             attr=attr,
             selector=selector,
@@ -136,7 +152,7 @@ class LinkItem(Item):
         )
 
 
-class ElementItem(Item):
+class ElementItem(_Item):
     def __init__(
         self,
         selector: str = None,
@@ -144,13 +160,15 @@ class ElementItem(Item):
         tags: Sequence[str] | str = None,
         attr: str = None,
         many: bool = True,
+        html: str | None = None,
     ):
+        super().__init__(html=html)
         self.field = ExtractorFactory.create_extractor("ElementExtractor")(
             attr=attr, selector=selector, xpath=xpath, tags=tags, many=many
         )
 
 
-class TextItem(Item):
+class TextItem(_Item):
     def __init__(
         self,
         selector: str = None,
@@ -159,7 +177,10 @@ class TextItem(Item):
         attr: str = None,
         iter_text: bool = True,
         many: bool = True,
+        html: str | None = None,
     ):
+        super().__init__(html=html)
+
         self.field = ExtractorFactory.create_extractor("TextExtractor")(
             attr=attr,
             selector=selector,
@@ -173,6 +194,7 @@ class TextItem(Item):
 class ItemDescriptor:
     def __set_name__(self, owner, name):
         self._name = "_" + name
+        self.name = name
 
     def __get__(self, instance, owner):
         """Get the extraction result
@@ -180,18 +202,19 @@ class ItemDescriptor:
         Args:
             instance: The instance
             owner: The owner class
-            
+
         Returns:
             The extraction result
         """
-        html = getattr(instance, self._name)
-
-        return getattr(self, "extractor").extract(html)
+        # html = getattr(instance, self.name)
+        # print(getattr(self, 'extractor'))
+        return getattr(self, "extractor").extract(getattr(instance, "html"))
 
     def __set__(self, instance, value):
-        assert isinstance(
-            value, (str, lxml.etree.ElementBase.__base__)
-        ), f"Expected (str, etree._Element), got {value.__class__.__name__}"
+        assert isinstance(value, (str, lxml.etree.ElementBase.__base__)), (
+            f"Expected (str, etree._Element), got {value.__class__.__name__}"
+        )
+
         setattr(instance, self._name, value)
 
 

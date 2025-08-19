@@ -579,8 +579,9 @@ class _LxmlElementExtractor(BaseExtractor):
         :param html: xml, html document
         :return: a list of the results
         """
+        results = []
         if html is None:
-            return []
+            return results
 
         assert isinstance(html, (str, etree.ElementBase.__base__)), (
             f"Expected 'str' or 'etree._Element', got '{html.__class__.__name__}'"
@@ -591,13 +592,11 @@ class _LxmlElementExtractor(BaseExtractor):
                 html = etree.HTML(html)
             except ValueError as e:
                 self.logger.error(e)
-                return []
+                return results
         elif isinstance(html, etree.ElementBase.__base__):
             html = html
         else:
-            return []
-
-        results = []
+            return results
 
         elements = self._find_elements(html)
 
