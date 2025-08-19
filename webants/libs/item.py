@@ -52,6 +52,8 @@ class ExtractorDescriptor:
             The extraction result
         """
         extractor = getattr(instance, self._name)
+        assert isinstance(extractor, BaseExtractor)
+
         mod_logger.debug(f"{type(extractor)}")
 
         return extractor.extract(instance.html)
