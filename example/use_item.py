@@ -404,7 +404,7 @@ class P:
     links = LinkItemDescriptor(
         selector="table.contentstable a.biglink",
         base_url="https://docs.python.org/3/index.html",
-        many=False,
+        many=True,
     )
     title = TextItemDescriptor(selector="title", many=False)
 

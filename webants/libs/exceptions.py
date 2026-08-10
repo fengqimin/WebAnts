@@ -34,6 +34,7 @@ __all__ = [
     "StorageError",
     "TooManyRedirects",
     "WebAntsException",
+    "exception_tracker",
 ]
 
 
@@ -351,14 +352,14 @@ class ExceptionTracker:
         """Initialize exception tracker."""
         self.exceptions: Dict[str, Dict[str, Any]] = {}
 
-    def track(self, exception: WebAntsException, handled: bool = True) -> None:
+    def track(self, exception: Exception, handled: bool = True) -> None:
         """Track an exception occurrence.
 
         Args:
             exception: Exception instance
             handled: Whether exception was handled
         """
-        code = exception.code
+        code = getattr(exception, "code", exception.__class__.__name__)
         if code not in self.exceptions:
             self.exceptions[code] = {
                 "count": 0,
@@ -385,7 +386,7 @@ class ExceptionTracker:
         stats["last_seen"] = now
 
         # Merge metadata
-        stats["metadata"].update(exception.metadata)
+        stats["metadata"].update(getattr(exception, "metadata", {}))
 
     def get_stats(self) -> Dict[str, Any]:
         """Get exception statistics.
@@ -399,6 +400,7 @@ class ExceptionTracker:
                 "rate": (
                     stats["count"] / (stats["last_seen"] - stats["first_seen"])
                     if stats["first_seen"]
+                    and stats["last_seen"] > stats["first_seen"]
                     else 0
                 ),
             }
@@ -411,4 +413,4 @@ class ExceptionTracker:
 
 
 # Global exception tracker
-# exception_tracker = ExceptionTracker()
+exception_tracker = ExceptionTracker()

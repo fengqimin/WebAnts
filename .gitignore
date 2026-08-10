@@ -1,6 +1,5 @@
 data/
 .idea/
-docs/
 __pycache__/
 .vscode/
 /build/
