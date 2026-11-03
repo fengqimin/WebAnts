@@ -6,7 +6,7 @@
 | 生成日期 | 2026-11-03 |
 | 文档范围 | `webants/`（全部 Python 源码）、`tests/`、`pyproject.toml`、`setup.py`、`requirements.txt`、`readme*.md`、`docs/architecture.md`、`example/use_item.py` |
 | 数据快照 | 仓库内无 SQLite 数据库文件；仅 `data/html/awesome-python.html`（约 152 KB 样例 HTML），未做行数统计 |
-| 运行验证 | `uv run pytest -q` → 1 failed, 75 passed（15.08s）；`uv run ruff check .` → 17 errors；`uv run isort --check .` → 7 个文件不合格；`uv run black --check .` → 不可用；行为复现脚本 4 组（见 [08](08-issues-and-recommendations.md)） |
+| 运行验证 | `uv run pytest -q` → 1 failed, 75 passed（14.33s）；`uv run ruff check .` → 17 errors；`uv run isort --check .` → 11 个文件不合格、2 个跳过；`uv run black --check .` → 不可用；问题复核（2026-11-03）见 [08](08-issues-and-recommendations.md) |
 
 ## 这个项目是什么
 
@@ -46,7 +46,7 @@ WebAnts 是一个用 `httpx` + `lxml` 实现的异步爬虫框架。它把爬取
 | [05 前端](05-frontend.md) | 本仓库无前端；说明唯一的示例脚本入口 | 前端/使用者 |
 | [06 依赖与边界](06-dependencies.md) | 运行时/开发依赖、使用点、模块依赖图、实测 lint 结果、耦合热点 | 维护者 |
 | [07 运行与运维](07-operations.md) | 环境准备、安装、运行模式、环境变量、构建、故障排查 | 运维/集成方 |
-| [08 问题与建议](08-issues-and-recommendations.md) | P0/P1/P2 问题登记、证据、根因、修复片段、路线图 | 维护者/评审者 |
+| [08 问题与建议](08-issues-and-recommendations.md) | 修订版：44 条 P0/P1/P2 问题登记、证据标注、问题簇与依赖、根因、修复建议、路线图 | 维护者/评审者 |
 | [09 代码索引](09-code-reference.md) | 按模块分组的 symbol → file:line → 用途 → 调用方 | 所有人 |
 
 ## 代码地图
