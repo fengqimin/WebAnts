@@ -1,3 +1,4 @@
+import asyncio
 from contextlib import asynccontextmanager
 from unittest.mock import AsyncMock
 
@@ -7,6 +8,7 @@ import pytest
 from webants.libs.exceptions import RequestError
 from webants.libs.request import Request
 from webants.libs.result import Result
+from webants.scheduler import ScheduleReason
 from webants.spider import Spider
 
 
@@ -33,12 +35,12 @@ async def offline_spider(spider: Spider, handler):
 
 async def run_request_chain(spider: Spider, request: Request) -> None:
     """Schedule and process one request, then drain requests it spawns."""
-    await spider.scheduler.schedule_request(request)
-    queued = await spider.scheduler.get_request()
-    await spider.process_request(queued)
+    await spider._schedule(request)
+    slot = await spider.scheduler.get_request()
+    await spider.process_request(slot.request, slot=slot)
     while not spider.scheduler.request_queue.empty():
-        queued = await spider.scheduler.get_request()
-        await spider.process_request(queued)
+        slot = await spider.scheduler.get_request()
+        await spider.process_request(slot.request, slot=slot)
 
 
 def collect_items(spider: Spider) -> list:
@@ -157,9 +159,17 @@ async def test_end_to_end_async_generator_callback():
         assert len(items) == 3
         assert spider.stats["successful_requests"] == 3
         assert spider.stats["failed_requests"] == 0
+        assert spider.stats["completed_requests"] == 3
         assert spider.downloader.stats["total_requests"] == 3
         assert spider.scheduler.stats["total_scheduled"] == 3
         assert spider.scheduler.stats["current_requests"] == 0
+        # Every slot taken during the crawl was handed back.
+        audit = spider.scheduler.audit()
+        assert audit["mismatch_count"] == 0
+        assert audit["outstanding"] == 0
+        assert audit["balanced"] is True
+        assert audit["idle"] is True
+        assert spider._inflight == {}
 
 
 @pytest.mark.asyncio
@@ -227,7 +237,7 @@ async def test_invalid_yield_goes_to_errback_once():
         assert isinstance(errors[0], TypeError)
         assert spider.stats["successful_requests"] == 0
         assert spider.stats["failed_requests"] == 1
-        assert spider._processing == set()
+        assert spider._inflight == {}
 
 
 @pytest.mark.asyncio
@@ -281,6 +291,7 @@ async def test_downloader_failure_reaches_errback():
 
 @pytest.mark.asyncio
 async def test_unscheduled_request_does_not_raise():
+    """P1-01: processing without a slot must not touch scheduler accounting"""
     spider = NoopSpider(retry_delay=0)
     async with offline_spider(spider, site_handler):
         request = Request(url="http://example.com/", callback=spider.parse)
@@ -288,25 +299,159 @@ async def test_unscheduled_request_does_not_raise():
         await spider.process_request(request)
 
         assert spider.stats["successful_requests"] == 1
-        assert spider._processing == set()
+        assert spider._inflight == {}
+        assert spider.scheduler.stats["slot_mismatches"] == 0
+        assert spider.scheduler.audit()["balanced"] is True
 
 
 @pytest.mark.asyncio
 async def test_circuit_blocked_request_releases_resources():
+    """P1-18: a request refused by the breaker still gives its slot back"""
     spider = NoopSpider(retry_delay=0, failure_threshold=1)
     async with offline_spider(spider, site_handler):
         domain = "example.com"
         request = Request(url="http://example.com/", callback=spider.parse)
 
-        await spider.scheduler.schedule_request(request)
-        queued = await spider.scheduler.get_request()
+        await spider._schedule(request)
+        slot = await spider.scheduler.get_request()
         sem = spider.scheduler.domain_semaphores[domain]
         spider._get_circuit_breaker(domain).record_failure()
 
-        await spider.process_request(queued)
+        await spider.process_request(slot.request, slot=slot)
 
-        assert spider._processing == set()
+        assert spider._inflight == {}
         assert sem._value == spider.scheduler.max_domain_concurrent
         assert spider.scheduler.stats["current_requests"] == 0
+        assert spider.scheduler.stats["slot_mismatches"] == 0
+        assert spider.scheduler.audit()["idle"] is True
         assert spider.stats["successful_requests"] == 0
         assert spider.stats["failed_requests"] == 0
+
+
+@pytest.mark.asyncio
+async def test_scheduled_signal_fires_only_for_queued_requests():
+    """P2-22: request_scheduled tracks real enqueue, not process_request entry"""
+    spider = DemoSpider(retry_delay=0)
+    async with offline_spider(spider, site_handler):
+        signals = []
+        spider.signals.connect(
+            "request_scheduled", lambda sender, request: signals.append(request.url)
+        )
+
+        await spider._schedule(Request(url="http://example.com/"))
+        duplicate = await spider._schedule(Request(url="http://example.com/"))
+
+        assert not duplicate
+        assert duplicate.reason is ScheduleReason.DUPLICATED
+        assert signals == ["http://example.com/"]
+
+
+@pytest.mark.asyncio
+async def test_inflight_keeps_same_url_requests_distinct():
+    """E5: one finishing request must not empty the in-flight table"""
+    spider = NoopSpider(retry_delay=0)
+    gate = asyncio.Event()
+    calls = {"count": 0}
+
+    async def scripted_fetch(request):
+        calls["count"] += 1
+        if calls["count"] == 1:
+            gate.set()
+            await asyncio.sleep(0.2)
+        elif calls["count"] == 2:
+            await asyncio.sleep(0.05)
+        return httpx.Response(200, request=httpx.Request("GET", request.url))
+
+    async with offline_spider(spider, site_handler):
+        spider.downloader.fetch = scripted_fetch
+        holding = Request(url="http://example.com/dup", callback=spider.parse)
+        finishing = Request(url="http://example.com/dup", callback=spider.parse)
+
+        long_task = asyncio.create_task(spider.process_request(holding))
+        await gate.wait()
+        short_task = asyncio.create_task(spider.process_request(finishing))
+        await asyncio.sleep(0)
+
+        assert spider.get_stats()["inflight_count"] == 2
+
+        await short_task
+        assert short_task.done() and not long_task.done()
+        assert spider.get_stats()["inflight_count"] == 1
+
+        await long_task
+        assert spider._inflight == {}
+
+
+@pytest.mark.asyncio
+async def test_start_runs_main_loop_to_completion():
+    """The polling main loop drains the queue, releases slots, then exits"""
+    spider = DemoSpider(retry_delay=0, concurrent_requests=2)
+    async with offline_spider(spider, site_handler):
+        items = collect_items(spider)
+
+        await asyncio.wait_for(spider.start(), timeout=10)
+
+        assert set(spider.parsed_paths) == {"/", "/a", "/b"}
+        assert len(items) == 3
+        assert spider._running is False
+        assert spider._inflight == {}
+        assert spider.get_stats()["inflight_count"] == 0
+        audit = spider.scheduler.audit()
+        assert audit["outstanding"] == 0
+        assert audit["mismatch_count"] == 0
+        assert audit["idle"] is True
+        assert spider.downloader.client.is_closed is True
+
+
+@pytest.mark.asyncio
+async def test_start_with_empty_queue_exits_immediately():
+    """No start URLs means no work: the loop must not hang"""
+    spider = NoopSpider(retry_delay=0)
+    spider.start_urls = []
+    async with offline_spider(spider, site_handler):
+        await asyncio.wait_for(spider.start(), timeout=5)
+
+        assert spider.stats["total_requests"] == 0
+        assert spider.scheduler.audit()["idle"] is True
+
+
+@pytest.mark.asyncio
+async def test_cancelled_request_releases_its_slot():
+    """Cancelling an in-flight task must return the permit via finally"""
+    spider = NoopSpider(retry_delay=0)
+    started = asyncio.Event()
+
+    async def hung_fetch(request):
+        started.set()
+        await asyncio.sleep(10)
+        return httpx.Response(200, request=httpx.Request("GET", request.url))
+
+    async with offline_spider(spider, site_handler):
+        spider.downloader.fetch = hung_fetch
+        await spider._schedule(Request(url="http://example.com/", callback=spider.parse))
+        slot = await spider.scheduler.get_request()
+        task = asyncio.create_task(spider.process_request(slot.request, slot=slot))
+
+        await started.wait()
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
+
+        assert slot.released is True
+        assert spider._inflight == {}
+        audit = spider.scheduler.audit()
+        assert audit["mismatch_count"] == 0
+        assert audit["idle"] is True
+
+
+@pytest.mark.asyncio
+async def test_closing_releases_queued_slots():
+    """E2 consumer side: discard_pending hands queued permits back"""
+    spider = NoopSpider(retry_delay=0)
+    async with offline_spider(spider, site_handler):
+        for index in range(3):
+            await spider._schedule(Request(url=f"http://example.com/{index}"))
+        assert spider.scheduler.stats["current_requests"] == 3
+
+        assert spider.scheduler.discard_pending() == 3
+
+        assert spider.scheduler.audit()["idle"] is True

@@ -13,13 +13,13 @@ import logging
 import time
 from collections import defaultdict
 from collections.abc import Iterable
-from typing import Any, AsyncGenerator, Callable, Dict, List, Optional, Set, Union
+from typing import Any, AsyncGenerator, Callable, Dict, List, Optional, Union
 
 from webants.downloader import Downloader
 from webants.libs.request import Request
 from webants.libs.result import Result
 from webants.parser import Parser
-from webants.scheduler import Scheduler
+from webants.scheduler import Scheduler, ScheduleReason, ScheduleResult, ScheduleSlot
 from webants.utils.logger import get_logger
 
 
@@ -198,6 +198,7 @@ class Spider:
             "start_time": None,
             "finish_time": None,
             "total_requests": 0,
+            "completed_requests": 0,
             "successful_requests": 0,
             "failed_requests": 0,
             "items_scraped": 0,
@@ -207,8 +208,10 @@ class Spider:
             "domain_stats": defaultdict(dict),
         }
 
-        # Error recovery
-        self._processing: Set[str] = set()
+        # Lifecycle and error recovery
+        # In-flight requests keyed by the task processing them. Keying by task
+        # instead of URL keeps two concurrent requests for the same URL distinct.
+        self._inflight: Dict[asyncio.Task, Request] = {}
         self.failure_threshold = failure_threshold
         self.recovery_timeout = recovery_timeout
 
@@ -372,10 +375,28 @@ class Spider:
             f"an async iterable, or None"
         )
 
+    async def _schedule(self, request: Request) -> ScheduleResult:
+        """Hand a request to the scheduler and report the honest outcome.
+
+        ``request_scheduled`` is emitted only when the request really entered
+        the queue, so domain statistics and listeners describe actual scheduling
+        instead of every request that reached ``process_request``.
+        """
+        result = await self.scheduler.schedule_request(request)
+        if result:
+            self.signals.send("request_scheduled", self, request=request)
+        elif result.reason is ScheduleReason.QUEUE_FULL:
+            self.logger.warning(f"Queue full, request dropped: {request.url}")
+        elif result.reason is ScheduleReason.LIMIT_REACHED:
+            self.logger.warning(f"Request limit reached, dropped: {request.url}")
+        else:
+            self.logger.debug(f"Request filtered ({result.reason.value}): {request.url}")
+        return result
+
     async def _dispatch_item(self, item: Any) -> None:
         """Dispatch one callback output item."""
         if isinstance(item, Request):
-            await self.scheduler.schedule_request(item)
+            await self._schedule(item)
         elif isinstance(item, Result):
             self.signals.send("item_scraped", self, item=item)
         else:
@@ -384,15 +405,28 @@ class Spider:
                 f"expected Request or Result"
             )
 
-    async def process_request(self, request: Request) -> None:
+    async def process_request(
+        self, request: Request, *, slot: Optional[ScheduleSlot] = None
+    ) -> None:
         """Process a single request with monitoring.
 
         Args:
             request: Request to process
+            slot: Scheduling slot owning the domain permit and accounting
+                entries for this request. Passed by the main loop; omitted when
+                a caller processes a request it never scheduled, in which case
+                there is nothing to release.
         """
         start_time = time.time()
         self.stats["total_requests"] += 1
-        self._processing.add(request.url)
+
+        # The main loop registers the task before it can yield, which keeps the
+        # exit check race-free. Direct callers (tests, library use) register
+        # themselves here so in-flight counting never depends on the loop.
+        current_task = asyncio.current_task()
+        tracked_externally = current_task in self._inflight
+        if current_task is not None and not tracked_externally:
+            self._inflight[current_task] = request
 
         domain = self._get_domain(request.url)
         circuit = self._get_circuit_breaker(domain)
@@ -404,7 +438,6 @@ class Spider:
                 )
                 return
 
-            self.signals.send("request_scheduled", self, request=request)
             response = await self.downloader.fetch(request)
             await self._invoke_callback(request, response)
 
@@ -430,20 +463,24 @@ class Spider:
             self.signals.send("request_finished", self, request=request, success=False)
 
         finally:
-            self._processing.discard(request.url)
-            try:
-                self.scheduler.request_completed(request)
-            except KeyError:
-                self.logger.warning(
-                    f"request_completed called for unscheduled request: {request.url}"
-                )
+            if current_task is not None and not tracked_externally:
+                self._inflight.pop(current_task, None)
+            if slot is not None:
+                slot.release()
 
-            # Update timing stats
+            # Update timing stats. ``completed_requests`` is the denominator a
+            # correct average needs; ``avg_request_time`` keeps its old
+            # (started-based) formula until P2-21 is addressed.
+            self.stats["completed_requests"] += 1
             elapsed = time.time() - start_time
             total_requests = self.stats["total_requests"]
             self.stats["avg_request_time"] = (
                 self.stats["avg_request_time"] * (total_requests - 1) + elapsed
             ) / total_requests
+
+    def _forget_task(self, task: asyncio.Task) -> None:
+        """Drop a finished task from the in-flight table."""
+        self._inflight.pop(task, None)
 
     async def start(self) -> None:
         """Start the spider with monitoring."""
@@ -458,18 +495,34 @@ class Spider:
         try:
             # Initialize requests
             async for request in self.start_requests():
-                await self.scheduler.schedule_request(request)
+                await self._schedule(request)
 
-            # Main loop
+            # Main loop. The scheduler never blocks forever: an empty queue
+            # yields None after a short poll, which is what lets the loop exit.
             while self._running:
-                request = await self.scheduler.get_request()
-                if not request:
-                    if not self._processing:
+                slot = await self.scheduler.get_request()
+                if slot is None:
+                    # An empty poll does not mean done: the pause it applied
+                    # lets running callbacks push new requests in. Quiescence
+                    # requires the queue to be empty as observed now, with no
+                    # task left that could still enqueue one.
+                    if not self._inflight and self.scheduler.request_queue.empty():
                         break
-                    await asyncio.sleep(0.1)
                     continue
 
-                asyncio.create_task(self.process_request(request))
+                request = slot.request
+                try:
+                    task = asyncio.create_task(
+                        self.process_request(request, slot=slot)
+                    )
+                except Exception:
+                    # The task never started, so nobody else can release.
+                    slot.release()
+                    raise
+                # Registered before yielding, so the exit check can never see
+                # an empty in-flight table while this request is still running.
+                self._inflight[task] = request
+                task.add_done_callback(self._forget_task)
 
         except Exception as e:
             self.logger.error(f"Spider error: {str(e)}")
@@ -505,7 +558,8 @@ class Spider:
             "scheduler_stats": self.scheduler.get_stats(),
             "parser_stats": self.parser.get_stats(),
             "downloader_stats": self.downloader.stats,
-            "processing": list(self._processing),
+            "processing": [request.url for request in self._inflight.values()],
+            "inflight_count": len(self._inflight),
             "circuits": {
                 domain: cb.state for domain, cb in self._domain_circuits.items()
             },
