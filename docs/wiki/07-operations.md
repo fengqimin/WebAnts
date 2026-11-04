@@ -52,10 +52,10 @@ uv run isort --check .
 
 | 模式 | 入口 | 说明 | 验证状态 |
 |------|------|------|----------|
-| 库调用 | 继承 `Spider`，`await start()` | 唯一的正式用法；无 CLI | 静态阅读；主链路有 P0-01，未做端到端验证 |
-| 单元测试 | `uv run pytest` | 6 个测试文件、76 个用例 | 已验证（1 失败） |
+| 库调用 | 继承 `Spider`，`await start()` | 唯一的正式用法；无 CLI | 主链路已按 ADR-0001 修复并由 `tests/test_spider.py` 覆盖；`start()` 主循环仍未加超时（P1-02） |
+| 单元测试 | `uv run pytest` | 8 个测试文件、98 个用例（含新增 `test_request.py`、`test_spider.py`） | 已验证（1 失败：`test_item.py::test_invalid_html`，P1-12） |
 | 示例脚本 | `python example/use_item.py` | 只演示 Item 描述符，不联网；import 即执行 | 未执行 |
-| Worker 模式 | `Downloader.start_downloader(many)` | 自建队列 + `fetch_retry`，与 Spider 主链路并行存在 | 未执行；注意它会取消事件循环内所有其他任务（`webants/downloader.py:402-405`） |
+| Worker 模式 | `Downloader.start_downloader(many)` | 兼容适配器，调用 `fetch`；`RequestError` 只记录日志 | 未执行；`start_downloader` 仍会取消事件循环内其他任务（`webants/downloader.py:457-472`，P1-20） |
 | 中间件/持久化 | 手工组装 `MiddlewareManager`/`PersisterManager` | 框架不自动接线 | 静态阅读 |
 
 ## 7.5 环境变量
@@ -118,15 +118,12 @@ stats = spider.get_stats()
 
 | 现象 | 可能原因 | 处理 |
 |------|----------|------|
-| `AssertionError: callback must be a coroutine function` | `parse` 写成了 async generator（含 `yield`） | 改成普通协程，或按 P0-01 修复契约 |
-| `TypeError: 'async for' requires an object with __aiter__` | `process_request` 对协程做 `async for` | 当前版本已知问题，见 P0-01 |
-| `KeyError: 'example.com'` | 请求未入队就进入 `process_request`，`finally` 释放时找不到域名 | 确认先 `schedule_request`；或修复 P1-01 |
-| 爬虫“卡住”不结束 | `get_request()` 在空队列上阻塞，`retry_failed` 不执行 | 见 P1-02；临时可向队列塞哨兵或加超时 |
+| 爬虫“卡住”不结束 | `get_request()` 在空队列上阻塞，主循环无法跳出 | 见 P1-02；临时可向队列塞哨兵或加超时 |
+| 回调抛 `TypeError` | 协程回调返回了非法类型（如字符串/dict） | 返回 `None`、`Request`、`Result` 或 Request/Result 组成的可迭代对象 |
 | `AttributeError: 'Link' object has no attribute 'decode'` | `FilteringLinkExtractor(normalize=False)` | 使用 `normalize=True`（默认） |
 | `ModuleNotFoundError: psutil` | `utils/statistic.py` 的未声明依赖 | `uv add psutil` 或不要 import 该模块 |
 | `ModuleNotFoundError: playwright` | 未安装可选组 | `uv sync --extra playwright` |
-| 403/404 被反复重试 | `RETRY_CODES` 包含 403/404 | 调整 `Downloader.RETRY_CODES` |
-| 测试网络失败 | `test_normal_request` 访问 httpbin | 断网时跳过或用 mock |
+| 429/5xx 反复重试 | 默认可重试状态码包含 408/425/429/500/502/503/504，并遵循 `Retry-After` | 通过 `Downloader(retry_status_codes=...)` 覆盖；403/404 已默认不重试 |
 | `black --check` 失败 | black 未声明/未安装 | 安装 black 或从流程中移除 |
 
 ## 7.10 部署说明

@@ -80,9 +80,10 @@ async def handle_error(self, error: Exception, request: Request) -> None:
 
 #### 2.2.2 Request 构造期校验
 
-- callback / errback 必须是可调用对象，且满足以下之一：
+- **callback** 必须是可调用对象，且满足以下之一：
   - `inspect.iscoroutinefunction(fn)`（普通协程，兼容形态）；
   - `inspect.isasyncgenfunction(fn)`（async generator，规范形态）。
+- **errback** 必须是 `inspect.iscoroutinefunction(fn)`；async generator 形式的 errback 没有意义，构造期拒绝。
 - 校验前先 `inspect.unwrap(fn)`，以支持 `functools.wraps` 装饰器。
 - 校验失败抛 `TypeError`，**不再使用 `assert`**。`assert` 在 `python -O` 下会被移除，不能作为公共 API 的契约检查。
 - callback 为 `None` 合法，表示“只下载、不解析”；Spider 不应因此报错。
@@ -331,4 +332,19 @@ sequenceDiagram
 - [08 问题与建议（修订版）](../wiki/08-issues-and-recommendations.md) — P0-01、P1-03、P1-14、P1-19
 - [03 爬虫主链路](../wiki/03-crawler.md) — 当前调用顺序与缺陷位置
 - [01 架构](../wiki/01-architecture.md) — 分层与运行时图
-- 代码位置：`webants/spider.py:349-395`、`webants/downloader.py:205-378`、`webants/libs/request.py:99-122`
+- 代码位置：`webants/spider.py:387-446`、`webants/downloader.py:209-432`、`webants/libs/request.py:99-223`
+
+## 10. 实施状态
+
+> 2026-11-04：C1–C8 已完成。测试基线 `1 failed, 97 passed`；唯一失败为既有 P1-12（`test_item.py::test_invalid_html`），与本 ADR 无关。
+
+| 任务 | 状态 | 证据 |
+|------|------|------|
+| C1 | 完成 | `webants/libs/request.py` 双类型校验 + `TypeError`；`tests/test_request.py` |
+| C2 | 完成 | `webants/downloader.py` 内联重试/退避/`Retry-After`/body/cookies/referer；`tests/test_downloader.py` |
+| C3 | 完成 | `webants/spider.py` 单点回调与归一化分发；`tests/test_spider.py` |
+| C4 | 完成 | 删除 `_retry_request`、`retry_failed`、`_failed_urls`；`fetch_retry` 保留为兼容别名 |
+| C5 | 完成 | `total_attempts` 与最终结果一次性计数；Downloader/Spider 口径分离 |
+| C6 | 完成 | `tests/test_spider.py` 10 个离线用例，含端到端与失败路径 |
+| C7 | 完成 | `tests/test_downloader.py` 13 个离线用例，移除真实网络依赖 |
+| C8 | 完成 | 03/08/09/wiki README 已同步新契约与行号 |

@@ -1,29 +1,30 @@
 # 03 爬虫主链路
 
-本章按一次爬取的顺序拆解 `Spider → Scheduler → Downloader → 解析/提取 → 回灌`。所有行号对应 `master @ 23f8051`。
+本章按一次爬取的顺序拆解 `Spider → Scheduler → Downloader → 解析/提取 → 回灌`。行号对应 2026-11-04 工作区（ADR-0001 实施后），基线逻辑仍来自 `master @ 23f8051`。
 
 ## 3.1 常量与默认值
 
 | 名称 | 值 | 位置 |
 |------|----|------|
 | `DEFAULT_REQUEST_HEADERS` | Accept、Accept-Language `en`、Accept-Encoding `gzip, deflate`、Connection `keep-alive`、固定 Firefox UA | `webants/libs/request.py:18-24` |
-| `Downloader.RETRY_CODES` | 403/404（5 次，factor 2）、408/420/429/500/502/503/504（3 次，429 factor 5，其余 2） | `webants/downloader.py:88-98` |
-| HTTP 超时 | `httpx.Timeout(30)`（Spider 默认） | `webants/spider.py:145,174`；`webants/downloader.py:148,170-174` |
-| 连接池 | `max_keepalive_connections=concurrency`、`max_connections=concurrency*2`、`keepalive_expiry=60` | `webants/downloader.py:176-183` |
-| 域名并发 | `max_domain_concurrent=10` | `webants/scheduler.py:30`；`webants/spider.py:168-170` |
+| `Downloader.DEFAULT_RETRY_STATUS_CODES` | 408/425/429/500/502/503/504（可由 `retry_status_codes` 覆盖） | `webants/downloader.py:93,163-171` |
+| 重试退避 | `base=1s`、`factor=2`、`max=60s`、`jitter=25%`；429/503 参考 `Retry-After` | `webants/downloader.py:163-166,289-324` |
+| HTTP 超时 | `httpx.Timeout(30)`（Spider 默认） | `webants/spider.py:143,175`；`webants/downloader.py:144,170-175` |
+| 连接池 | `max_keepalive_connections=concurrency`、`max_connections=concurrency*2`、`keepalive_expiry=60` | `webants/downloader.py:180-187` |
+| 域名并发 | `max_domain_concurrent=10` | `webants/scheduler.py:30`；`webants/spider.py:170-178` |
 | 调度队列容量 | 10000 | `webants/scheduler.py:32,47` |
 | 解析缓存 | `lru_cache(maxsize=1000)` | `webants/parser.py:23,74-76` |
 | 文档大小上限 | 10 MB | `webants/parser.py:33,51` |
-| 默认 UA（Downloader） | Firefox 116 字符串 | `webants/downloader.py:187-190` |
+| 默认 UA（Downloader） | Firefox 116 字符串 | `webants/downloader.py:189-195` |
 
 ## 3.2 阶段 1：构造与初始请求
 
-1. `Spider.__init__` 实例化三个组件：`Scheduler(max_domain_concurrent=concurrent_requests)`、`Downloader(concurrency=..., timeout=...)`、`Parser()`（`webants/spider.py:168-176`）。三者之间**没有注入关系**，各自持有独立状态。
-2. 初始化 `stats`、`_failed_urls`、`_processing`、`_domain_circuits`，并注册五个默认信号处理器（`webants/spider.py:194-224`）。
-3. `start_requests()` 遍历 `start_urls`，为每个 URL 构造 `Request(callback=self.parse, errback=self.handle_error, retries=..., timeout=...)`（`webants/spider.py:270-283`）。
-4. `Request.__init__` 校验 method/URL，并断言 callback/errback 为 coroutine function（`webants/libs/request.py:99-118`）。
+1. `Spider.__init__` 实例化三个组件：`Scheduler(max_domain_concurrent=concurrent_requests)`、`Downloader(concurrency=..., timeout=...)`、`Parser()`（`webants/spider.py:170-178`）。三者之间**没有注入关系**，各自持有独立状态。
+2. 初始化 `stats`、`_processing`、`_domain_circuits`，并注册五个默认信号处理器（`webants/spider.py:197-225`）。
+3. `start_requests()` 遍历 `start_urls`，为每个 URL 构造 `Request(callback=self.parse, errback=self.handle_error, retries=..., timeout=...)`（`webants/spider.py:271-284`）。
+4. `Request.__init__` 校验 method/URL；callback 接受 `iscoroutinefunction` **或** `isasyncgenfunction`，errback 只接受 coroutine function；不满足时抛 `TypeError`（`webants/libs/request.py:99-122,167-222`）。
 
-> 第 4 步是主链路的第一个硬约束：回调必须是普通协程函数，不能是 async generator。
+> 回调契约由 [ADR-0001](../adr/0001-callback-contract-and-retry-ownership.md) 冻结：规范形态是 async generator，普通协程作为兼容形态由 Spider 归一化。`assert` 已替换为 `TypeError`，避免 `python -O` 下失效。
 
 ## 3.3 阶段 2：入队与去重
 
@@ -46,54 +47,57 @@
 
 ## 3.4 阶段 3：主循环与下载
 
-`Spider.start`（`webants/spider.py:397-430`）：
+`Spider.start`（`webants/spider.py:448-490`）：
 
 1. 幂等检查 `_running`，设置 `start_time`，发 `spider_started`。
 2. 把所有初始请求 `await schedule_request(...)`。
-3. `while self._running:` → `await scheduler.get_request()`；队列空且无处理中请求时 `break`，否则 `sleep(0.1)` 后重试（`:413-419`）。
-4. 取到请求后 `asyncio.create_task(process_request(request))`（`:421`）。
-5. 若 `_failed_urls` 非空，`await retry_failed()`（`:423-425`）。
+3. `while self._running:` → `await scheduler.get_request()`；队列空且无处理中请求时 `break`，否则 `sleep(0.1)` 后重试（`:462-470`）。
+4. 取到请求后 `asyncio.create_task(process_request(request))`（`:472`）。
 
-`process_request`（`webants/spider.py:349-395`）：
+> 主循环仍没有超时等待，任务也未被跟踪（P1-02，属于第 2 阶段）。Spider 级重试已删除，`_failed_urls`/`retry_failed` 不再存在。
 
-1. 计时、`total_requests+1`、`_processing.add(url)`（`:355-357`）。
-2. 取域名熔断器；`allow_request()` 为假则直接 `return`（`:359-364`）。
-3. 发 `request_scheduled` 信号（`:367`）。
-4. `response = await self.downloader.fetch(request)`（`:368`）。
-5. 若存在 callback，则 `async for result in request.callback(response):`（`:370-375`）：
-   - `Request` → 回灌 Scheduler；
-   - `Result` → 发 `item_scraped`。
-6. 成功：`circuit.record_success()`、`successful_requests+1`、发 `request_finished(success=True)`（`:377-379`）。
-7. 异常：调用 errback、发 `request_finished(success=False)`（`:381-384`）。
-8. `finally`：`_processing.remove(url)`、`scheduler.request_completed(request)`、更新平均耗时（`:386-395`）。
+`process_request`（`webants/spider.py:387-446`）：
 
-`Downloader.fetch`（`webants/downloader.py:361-378`）：
+1. 计时、`total_requests+1`、`_processing.add(url)`（`:393-395`）。
+2. 取域名熔断器；`allow_request()` 为假时记录日志并 `return`。判断位于 `try` 内，`finally` 仍会释放资源（`:400-404`）。
+3. 发 `request_scheduled` 信号（`:406`）。
+4. `response = await self.downloader.fetch(request)`（`:407`）。
+5. **只调用一次** `_invoke_callback(request, response)`（`:317-346`）：
+   - async generator 回调：`async for` 消费；
+   - 普通协程回调：`await` 后按 `None` / 单个 `Request|Result` / 同步可迭代 / 异步可迭代归一化（`:348-373`）；
+   - 其他返回类型：抛 `TypeError`，走 errback。
+6. 分发（`:375-385`）：`Request` → `Scheduler.schedule_request`；`Result` → `item_scraped`；其他类型 → `TypeError`。
+7. 成功：`circuit.record_success()`、`successful_requests+1`、发 `request_finished(success=True)`（`:413-416`）。
+8. 异常：`circuit.record_failure()`（每个逻辑请求只记一次）、`failed_requests+1`、调用 errback 一次；errback 自身异常只记录日志（`:418-432`）。
+9. `finally`：`_processing.discard(url)`；`scheduler.request_completed(request)` 的 `KeyError` 被捕获并告警；更新平均耗时（`:433-446`）。
 
-1. `_fetch(request)`（`:205-262`）：按 `request.delay or self.delay` 等待；选 headers；`client.request(method, url, headers, timeout)`。
-2. 成功返回 `httpx.Response`；`httpx.HTTPError` 与其他异常都记录并返回**原 `Request`**。
-3. `fetch` 收到 `Response` 后，如果 `request.callback` 非空，`await request.callback(result, request.cb_kwargs)`（`:372-375`）。
-4. 收到 `Request`（失败）时，返回 `httpx.Response(status_code=600, extensions={"Request": request})`（`:377-378`）。
+`Downloader.fetch`（`webants/downloader.py:335-432`）：
 
-> 缺陷集中区：`fetch` 已经调用过一次回调，`process_request` 又对 `request.callback(response)` 的返回值做 `async for`。实测第二次是对协程对象迭代，抛 `TypeError: 'async for' requires an object with __aiter__ method, got coroutine`，随后被 errback 捕获，统计为失败（[P0-01](08-issues-and-recommendations.md)）。另外 `fetch` 以位置参数传 `request.cb_kwargs`，与常见 `parse(self, response, **kwargs)` 签名不兼容，实测会先抛 “takes 2 positional arguments but 3 were given”。
+1. `max_attempts = max(1, retries + 1)`；`total_requests+1`；首次请求前只等待一次 `request.delay or self.delay`（`:354-361`）。
+2. 循环尝试：第 `n` 次重试前计算指数退避，并按 429/503 的 `Retry-After` 取较大值（`:363-378`）；每次尝试 `total_attempts+1`。
+3. `_fetch`（`:209-269`）只做单次 HTTP：透传 method/url/headers/timeout、body（dict → `json`，其余 → `content`）、cookies（合并 client jar 后显式 `Cookie` 头）、referer；**不调用 callback**，异常不吞。
+4. 状态码命中 `retry_status_codes`：未耗尽则继续；耗尽抛 `RequestError(code="RETRY_EXHAUSTED")`（`:395-414`）。
+5. 传输异常：未耗尽则继续；耗尽抛 `RequestError(code="FETCH_FAILED")`（`:381-394`）。
+6. 非可重试响应（含 2xx/3xx/4xx）：`successful_requests+1` 并返回 `httpx.Response`（`:416-417`）。
 
-## 3.5 阶段 4：重试（worker 模式）
+> ADR-0001 已解决：P0-01（回调重复调用/类型冲突）、P1-03（fetch 不重试）、P1-13（body/cookies 未透传）、P1-14（600 伪响应）、P1-19（重试投递到私有队列）。重试不再修改 `request.retries`/`request.delay`，也不再跨队列。
 
-`fetch_retry` 只在 `start_worker` 中调用（`webants/downloader.py:386`），Spider 不会走到这里。
+## 3.5 阶段 4：重试（Downloader 内部）
 
-状态码重试（`:307-332`）：
+重试归属由 [ADR-0001](../adr/0001-callback-contract-and-retry-ownership.md) 冻结：**`Downloader.fetch` 内部完成，Scheduler 与 Spider 不重试**。`fetch_retry` 仅保留为兼容别名，行为与 `fetch` 相同。
 
-- 状态码命中 `RETRY_CODES` 且 `retries > 0`：读取该状态码的 `backoff_factor` 与 `max_retries`，计算
-  `backoff_delay = retry_delay * (backoff_factor ** (max_retries - request.retries))`（`:313-316`），写入 `request.delay`；
-- `_retry_request` 执行 `retries -= 1`、`priority += 10`、`put_nowait` 回 `request_queue`（`:274-287`）；
-- 返回 `None`，本轮 worker 结束。
+- 总尝试次数：`max(1, request.retries + 1)`；`request.retries` 表示首次尝试之外的额外次数，重试过程中**不修改**该字段（`webants/downloader.py:354`）。
+- 可重试状态码：408、425、429、500、502、503、504；403/404/420 不再重试（`:93,168-171`）。
+- 退避：`delay = min(max_delay, base_delay * factor ** retry_index)`，再叠加最多 25% 抖动（`:289-300`）。
+- `Retry-After`：429/503 时取“计算退避”与响应头的较大值；支持秒数与 HTTP-date（`:302-324`）。
+- 最终结果：
+  - 收到非可重试响应 → 返回 `httpx.Response`；
+  - 传输异常耗尽 → `RequestError(code="FETCH_FAILED")`；
+  - 可重试状态耗尽 → `RequestError(code="RETRY_EXHAUSTED")`，metadata 含 `status_code/headers/url/attempts`（`:381-414`）。
+- 重试期间占用当前域名并发槽位；这是 v1 的显式取舍，未来若需“退避让出槽位”，应引入延迟队列而不是把重试散落到 Spider。
+- worker 模式（`start_worker`）只是兼容适配器：调用 `fetch`，成功响应入 `response_queue`，失败记录日志；Spider 不走该路径（`:435-457`）。
 
-异常重试（`:340-359`）：`_fetch` 返回 `Request` 且 `retries > 0` → 同上；耗尽后返回 `status_code=600`，并再一次 `failed_requests+1`。
-
-可疑点：
-
-- 退避指数用配置里的 `max_retries` 减去当前 `retries`，而不是“已重试次数”；当 `Request.retries` 大于该状态码的 `max_retries` 时指数为负（`:313-316`）。
-- `priority += 10` 的注释写 “Lower priority”，但 `Request.__lt__` 反转，数值越大越先出队，实际是**提高**优先级（`webants/libs/request.py:175-177`；`webants/downloader.py:279`）。
-- `_retry_request` 写入的是 Downloader 自己的 `request_queue`；`fetch_retry` 的直接调用方（测试、手工）不会自动消费该队列。
+> P1-03、P1-19、P2-01 均已随本阶段关闭。重试不再使用 `max_retries - retries` 作为指数，也不再向 Downloader 私有队列投递。
 
 ## 3.6 阶段 5：解析与提取
 
@@ -151,26 +155,26 @@
 |------|------|----------|
 | `seen_urls` | `Scheduler` 实例 | 进程内，无上限 |
 | `domain_stats` / `domain_semaphores` | `Scheduler` 实例 | 每域名一份，不清理 |
-| `_failed_urls` / `_processing` | `Spider` 实例 | 进程内 |
-| `retry_requests` | `Downloader` 实例 | 进程内，记录重试过的 URL |
+| `_processing` | `Spider` 实例 | 进程内，当前处理中的 URL |
+| `retry_requests` / `total_retries` / `total_attempts` | `Downloader.stats` | 进程内计数，不再保存 URL 集合 |
 | `_cached_parse` LRU | Parser 类级缓存 | 最多 1000 条，实例被 key 持有 |
 | `_css_cache` / `_xpath_cache` | Parser 实例 dict | 无上限 |
-| `response_queue` | Downloader 实例 | 默认创建但 Spider 不消费 |
+| `response_queue` | Downloader 实例 | 默认创建但 Spider 不消费（仅 worker 模式） |
 
 ## 3.8 失败模式
 
 | 场景 | 实际行为 | 证据 |
 |------|----------|------|
-| 队列为空但仍有处理中任务 | `get_request()` 阻塞等待，主循环无法继续，`retry_failed` 不会执行 | `webants/spider.py:413-425`、`webants/scheduler.py:170-181` |
-| 队列为空且无处理中任务 | 本应 `break`，但 `get_request()` 先阻塞，永远到不了判断 | `webants/spider.py:414-419` |
-| 回调是 async generator | `Request` 构造期 `AssertionError` | `webants/libs/request.py:110-114` |
-| 回调是普通协程 | `fetch` 内调用一次，`process_request` 再 `async for` 协程 → `TypeError` | 实测；`webants/spider.py:370-371` |
-| 下载失败（HTTPError） | `fetch` 返回 600 响应，`process_request` 把它当成功响应继续回调 | `webants/downloader.py:377-378` |
-| 请求未入队就调用 `process_request` | `finally` 中 `request_completed` 抛 `KeyError` | 实测；`webants/scheduler.py:189-190` |
+| 队列为空但仍有处理中任务 | `get_request()` 阻塞等待，主循环无法继续 | `webants/spider.py:462-470`、`webants/scheduler.py:170-181` |
+| 队列为空且无处理中任务 | 本应 `break`，但 `get_request()` 先阻塞，永远到不了判断 | `webants/spider.py:463-469` |
+| 回调是 async generator | 正常执行；`Request` 构造期接受 | `webants/libs/request.py:167-202`、`webants/spider.py:317-346` |
+| 回调是普通协程 | 正常执行；返回值由 Spider 归一化 | `webants/spider.py:348-373` |
+| 下载失败（HTTPError/可重试状态耗尽） | `fetch` 抛 `RequestError`，`process_request` 走 errback；不再构造 600 | `webants/downloader.py:381-414` |
+| 请求未入队就调用 `process_request` | `finally` 捕获 `request_completed` 的 `KeyError` 并告警，不再掩盖原始异常 | `webants/spider.py:433-441` |
 | 队列满 | `PriorityQueue.put` 挂起；持有域名信号量 | `webants/scheduler.py:118,163` |
 | 文档为空字符串 | `fromstring` 抛错并包装为 `ParserError` | `webants/parser.py:90-105` |
 | 链接过滤 `normalize=False` | `urlparse(Link)` → `AttributeError: 'Link' object has no attribute 'decode'` | 实测；`webants/libs/extractor.py:307-313,889-895` |
-| 站点返回 403/404 | 在 `fetch_retry` 路径会重试 5 次；在 `fetch` 路径只返回响应 | `webants/downloader.py:88-98,361-378` |
+| 站点返回 403/404 | 直接返回 Response，不重试；是否视为失败由 callback 决定 | `webants/downloader.py:93,416-417` |
 
 ## 3.9 入口与“CLI”
 

@@ -49,7 +49,7 @@ flowchart TD
 
 ## 1.4 核心数据流
 
-### 主流程（设计意图）
+### 主流程（ADR-0001 实施后）
 
 ```mermaid
 sequenceDiagram
@@ -72,49 +72,54 @@ sequenceDiagram
         SP->>SP: create_task(process_request)
         SP->>SP: 熔断器 allow_request
         SP->>DL: await fetch(request)
-        DL->>NET: client.request(...)
-        NET-->>DL: httpx.Response
-        DL->>CB: await request.callback(response, cb_kwargs)
-        CB-->>DL: 返回值
-        DL-->>SP: 返回值
-        SP->>CB: async for result in request.callback(response)
+        loop attempts = retries+1
+            DL->>NET: client.request(...)
+            alt 传输错误 / 可重试状态码
+                DL->>DL: 退避 + Retry-After 后重试
+            else 非可重试响应
+                NET-->>DL: httpx.Response
+            end
+        end
+        DL-->>SP: httpx.Response 或 raise RequestError
+        SP->>CB: _invoke_callback(request, response)（一次）
+        CB-->>SP: async for / 归一化后的 Request | Result
         SP->>SCH: schedule_request(新 Request)
         SP->>SP: signals.send item_scraped
         SP->>SCH: request_completed(request)
     end
 ```
 
-> 图中最后两步（`async for` 回调、`request_completed`）是代码的**实际写法**，但与 `Downloader.fetch` 的回调调用叠加后会产生冲突；这正是 [P0-01](08-issues-and-recommendations.md) 的核心。设计意图来自 `docs/architecture.md:120-152`，实现见 `webants/spider.py:349-395`、`webants/downloader.py:361-378`。
+> 依据 [ADR-0001](../adr/0001-callback-contract-and-retry-ownership.md)：`Downloader.fetch` 不再调用回调，重试内联；`Spider._invoke_callback` 单点归一化 async generator / coroutine。实现见 `webants/spider.py:317-446`、`webants/downloader.py:335-432`。
 
-### 重试流程（仅 worker 模式）
+### 下载重试与 worker 兼容适配器
 
 ```mermaid
 flowchart TD
     A["start_downloader(many)"] --> B["创建 many 个 start_worker"]
     B --> C["await _next_request()"]
-    C --> D["fetch_retry(request)"]
-    D --> E{"_fetch 返回类型"}
-    E -- "httpx.Response 且状态码在 RETRY_CODES" --> F{"retries > 0?"}
-    F -- 是 --> G["_retry_request: retries-1, priority+10, put_nowait"]
-    G --> H["返回 None，等待下一轮"]
-    F -- 否 --> I["返回 None"]
-    E -- "状态码正常" --> J["await request.callback(...)"]
-    E -- "Request（HTTPError）" --> K{"retries > 0?"}
+    C --> D["fetch(request)"]
+    D --> E{"_fetch 结果"}
+    E -- "httpx.Response 且状态码可重试" --> F{"attempts &lt; retries+1?"}
+    F -- 是 --> G["退避 + Retry-After 后重试同一 fetch"]
+    G --> D
+    F -- 否 --> H["raise RequestError(RETRY_EXHAUSTED)"]
+    E -- "httpx.HTTPError" --> K{"attempts &lt; retries+1?"}
     K -- 是 --> G
-    K -- 否 --> L["构造 status_code=600 的 Response"]
-    J --> M["response_queue.put_nowait"]
-    L --> M
+    K -- 否 --> L["raise RequestError(FETCH_FAILED)"]
+    E -- "非可重试响应" --> M["response_queue.put_nowait"]
+    H --> N["worker 记录错误，不投递"]
+    L --> N
 ```
 
-证据：`webants/downloader.py:289-359`、`380-409`。注意 `Spider` 实际调用的是 `fetch` 而非 `fetch_retry`（`webants/spider.py:368`），所以上图的重试逻辑在主链路中不会触发（[P1-03](08-issues-and-recommendations.md)）。
+证据：`webants/downloader.py:335-432`、`435-457`。`Spider.process_request` 也调用同一个 `fetch`（`webants/spider.py:408`），Spider 级 `_failed_urls` / `retry_failed` 已随 ADR-0001 移除；worker 模式仅是兼容适配器，不再跨队列重试。
 
 ## 1.5 目录 → 责任
 
 | 目录/文件 | 责任 | 关键入口 |
 |-----------|------|----------|
-| `webants/spider.py` | 生命周期、信号、熔断、统计、失败重试 | `Spider.start` `:397` |
+| `webants/spider.py` | 生命周期、信号、熔断、统计、回调归一化 | `Spider.start` `:448` |
 | `webants/scheduler.py` | 队列、去重、域名并发、延迟 | `Scheduler.schedule_request` `:78` |
-| `webants/downloader.py` | HTTP、重试、连接池、统计 | `Downloader.fetch` `:361` |
+| `webants/downloader.py` | HTTP、重试、退避、`Retry-After`、统计 | `Downloader.fetch` `:335` |
 | `webants/parser.py` | 解析、缓存、选择器 | `Parser.parse` `:107` |
 | `webants/libs/request.py` | 请求模型与校验 | `Request.__init__` `:55` |
 | `webants/libs/result.py` | 结果与字段模型 | `Result.__init__` `:68` |
@@ -145,7 +150,7 @@ flowchart TD
 
 | 决策 | 备选 | 结果 / 影响 |
 |------|------|-------------|
-| 用回调返回值驱动后续请求 | 由 Spider 统一解析并返回列表 | 回调既是协程又被 `async for` 迭代，契约冲突（P0-01） |
+| 用回调返回值驱动后续请求 | 由 Spider 统一解析并返回列表 | 早期回调既是协程又被 `async for` 迭代；ADR-0001 冻结为 “async generator 规范 + coroutine 兼容归一化”（P0-01 已关闭） |
 | 调度器持有域名信号量 | Downloader 内限流 | 信号量在入队前 acquire，队列满时阻塞且异常路径不释放（P1-04） |
 | `Request.__lt__` 反转比较 | 常规小值优先 | 数值越大越先出队；重试 `priority += 10` 实际提高优先级，与注释矛盾（P2-02） |
 | 保留两套熔断器 | 统一为一套 | `spider.py` 与 `middleware.py` 各一份，状态互不共享 |
@@ -158,7 +163,7 @@ flowchart TD
 ## 1.8 非功能特性
 
 - **并发**：调度器为每个域名建 `asyncio.Semaphore(max_domain_concurrent)`（`webants/scheduler.py:111-113`），下载器另有 `asyncio.Semaphore(concurrency)`（`webants/downloader.py:154`）。两者默认值都来自 `Spider(concurrent_requests=10)`，但分属不同层，实际并发是两层约束的叠加。
-- **可靠性**：失败请求进入 `_failed_urls` 并由 `retry_failed` 重新调度（`webants/spider.py:322-347`）；但主循环在队列为空时会阻塞在 `get_request()`，失败重试可能永远等不到执行（P1-02）。
+- **可靠性**：重试完全内聚在 `Downloader.fetch`（`webants/downloader.py:335-432`）；耗尽后抛 `RequestError`，`Spider.process_request` 走 errback 一次。Spider 级 `_failed_urls` 已随 ADR-0001 移除；主循环在队列为空时仍会阻塞在 `get_request()`（P1-02）。
 - **可观测性**：`Spider.get_stats()` 聚合 scheduler/parser/downloader 统计（`webants/spider.py:450-466`）；日志通过 `get_logger` 按名字复用 handler（`webants/utils/logger.py:31-35`）。
 - **安全**：框架不处理认证、不校验目标站点、默认跟随重定向并带固定 UA（`webants/downloader.py:150,187-190`）；SQLite 表名用 f-string 拼接（`webants/libs/persister.py:354,451`），仅在配置可信时安全。
 - **可移植性**：`setup.py` 声明 `Operating System :: Microsoft :: Windows`（`setup.py:33`），但源码本身使用 `pathlib`，跨平台障碍主要来自测试与示例中的硬编码路径。
@@ -167,11 +172,11 @@ flowchart TD
 
 | 风险 | 说明 | 关联问题 |
 |------|------|----------|
-| 主链路回调不可用 | `fetch` 先调用一次回调，`process_request` 又对协程做 `async for` | P0-01 |
+| 主链路回调已修复，但生命周期不完整 | `Downloader.fetch` 不再调用回调；Spider 归一化调用；`_processing`/`request_completed` 已容错，但主循环无超时 | P0-01 Closed；P1-02 仍在 |
 | 调度/处理生命周期耦合 | `request_completed` 假设请求一定入队过；主循环无超时 | P1-01、P1-02 |
 | 可选层“存在但不可用” | 中间件、持久化、配置、异步信号均未接入 | P1-11 |
-| 重试语义分裂 | `fetch` 不重试，`fetch_retry` 只在 worker 路径 | P1-03、P2-01 |
+| 重试语义分裂 | 已按 ADR-0001 收敛到 `Downloader.fetch`；`fetch_retry` 仅别名 | ~~P1-03、P2-01~~ Closed |
 | 数据易丢失 | Persister 无 flush；无进程退出钩子 | P1-09 |
 | 配置合并错误 | 嵌套 YAML 会被拍平到顶层 | P1-06 |
 
-架构层面的建议顺序：先定回调契约（P0-01），再修生命周期与重试（P1-01/02/03），最后决定可选层是接入还是移出文档承诺（P1-11）。
+架构层面的建议顺序：回调契约（P0-01）与重试归属（P1-03）已冻结并落地；下一步修生命周期（P1-01/02/04/18/20），最后决定可选层是接入还是移出文档承诺（P1-11）。

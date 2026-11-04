@@ -24,11 +24,11 @@
 
 ## 8.2 验证环境与证据
 
-所有结论基于 `master @ 23f8051`，Python 3.12.11，`uv 0.13.6`。下表中的数量为 **2026-11-03 复测值**。
+所有结论基于 `master @ 23f8051`，Python 3.12.11，`uv 0.13.6`。下表中的数量为 **2026-11-04 复测值**（第 1 阶段完成后）。
 
 | 验证项 | 命令 / 脚本 | 实际结果 |
 |--------|-------------|----------|
-| 测试套件 | `uv run pytest -q` | `1 failed, 75 passed in 14.33s`；失败为 `tests/test_item.py::test_invalid_html` |
+| 测试套件 | `uv run pytest -q` | `1 failed, 97 passed`；失败仍为 `tests/test_item.py::test_invalid_html`（P1-12）；新增 `test_request.py`、`test_spider.py`，`test_downloader.py` 已全部离线化 |
 | Lint | `uv run ruff check .` | `Found 17 errors`，全部 `F401` |
 | 导入排序 | `uv run isort --check .` | **11 个文件不合格，2 个文件跳过**（原版记 7 个，已更新） |
 | 格式检查 | `uv run black --check .` | `Failed to canonicalize script path`，无法运行；且 `dev` 依赖组未声明 black |
@@ -44,6 +44,8 @@
 > 复现约定：`实测` 项应能由 8.11 的验收用例覆盖；`静态` 项在修复前需要补一条最小回归测试。
 
 ## 8.3 问题总表
+
+> 修复状态见 [8.13 实施状态](#813-实施状态)。未列入 8.13 的条目仍为 Open。
 
 ### 8.3.1 P0
 
@@ -133,6 +135,8 @@ graph TD
 
 ## 8.5 P0 详解
 
+> **状态：Closed（2026-11-04）。** 以下保留问题记录；修复依据 [ADR-0001](../adr/0001-callback-contract-and-retry-ownership.md)，当前行为以 [03 主链路](03-crawler.md) 与 8.13 为准。
+
 ### P0-01 回调契约冲突导致 Spider 主链路不可用
 
 **现象**：`Spider.process_request` 在 `await downloader.fetch(request)` 之后，执行 `async for result in request.callback(response)`（`webants/spider.py:370-375`）。但 `Downloader.fetch` 内部已经 `await request.callback(result, request.cb_kwargs)`（`webants/downloader.py:371-375`）。因此：
@@ -202,6 +206,8 @@ else:
 4. `cb_kwargs` 以关键字传递。
 
 ## 8.6 P1 详解
+
+> **已关闭：P1-03、P1-13、P1-14、P1-18、P1-19。** 以下保留原始分析与修复建议；当前实现以 8.13 与 [03 主链路](03-crawler.md) 为准。
 
 ### P1-01 未入队请求在 finally 中触发 KeyError
 
@@ -586,7 +592,7 @@ await self.request_queue.put((request.priority, request))
 | 阶段 | 内容 | 理由 | 验收 |
 |------|------|------|------|
 | 0 | 写 [ADR-0001](../adr/0001-callback-contract-and-retry-ownership.md)：确定回调契约、重试归属、失败信号（已完成 2026-11-04） | 避免后续反复改 | 文档评审通过，P0-01 方案冻结 |
-| 1 | P0-01、P1-03、P1-13、P1-14、P1-19 + `tests/test_spider.py` | 同一问题簇，必须一起改 | MockTransport 端到端：初始页 → 解析 2 个链接 → 抓取子页 → 产出 Result |
+| 1 | P0-01、P1-03、P1-13、P1-14、P1-19 + `tests/test_spider.py`（已完成 2026-11-04） | 同一问题簇，必须一起改 | MockTransport 端到端：初始页 → 解析 2 个链接 → 抓取子页 → 产出 Result |
 | 2 | P1-01、P1-02、P1-04、P1-18、P1-20、P2-20、P2-23 | 生命周期与资源泄漏 | 异常、取消、熔断三种场景下计数恢复 |
 | 3 | P1-05、P1-06、P1-07、P1-08、P1-15 ~ P1-17、P2-15 ~ P2-17 | 数据正确性 | 提取器矩阵、Config 合并、缓存统计、信号排序全部通过 |
 | 4 | P1-09、P1-10、P1-11、P2-19 | 可选层接入与关闭语义 | flush 后条数一致；缓存命中语义明确；组装示例可运行 |
@@ -605,6 +611,26 @@ await self.request_queue.put((request.priority, request))
 - [ ] Persister 在进程退出前能 flush 全部缓存；SQLite 行数与 `save` 次数一致。
 - [ ] `black --check`、`ruff check`、`isort --check` 在 CI 中可稳定运行（版本固定）。
 - [ ] README 与 `docs/architecture.md` 的能力描述与运行路径一致（不再声称未接入的层已生效）。
+
+## 8.13 实施状态
+
+> 更新于 2026-11-04。实现依据 [ADR-0001](../adr/0001-callback-contract-and-retry-ownership.md)（Accepted）。
+
+| 条目 | 状态 | 证据 / 说明 |
+|------|------|-------------|
+| P0-01 | **Closed** | `Downloader.fetch` 不再调用回调；Spider 单点调用并归一化 async generator/coroutine；`Request` 双类型校验。`tests/test_request.py`、`tests/test_spider.py` |
+| P1-03 | **Closed** | 重试内联到 `Downloader.fetch`；`fetch_retry` 仅兼容别名。`tests/test_downloader.py` |
+| P1-13 | **Closed** | `_fetch` 透传 body（dict→json）、cookies（显式 Cookie 头）、referer；测试 `test_body_cookies_and_referer_are_sent` |
+| P1-14 | **Closed** | 删除 600 哨兵；失败抛 `RequestError(FETCH_FAILED/RETRY_EXHAUSTED)`；测试 `test_downloader_failure_reaches_errback` |
+| P1-18 | **Closed** | 熔断判断移入 `try`，`finally` 释放；测试 `test_circuit_blocked_request_releases_resources` |
+| P1-19 | **Closed** | 删除 `_retry_request` 与跨队列投递；重试在 `fetch` 内完成 |
+| P2-01 | **Closed** | 移除 403/404/420；新增 425；退避按已重试次数计算；支持 `Retry-After` |
+| P1-01 | 部分缓解 | `_processing.discard` + `request_completed` 的 `KeyError` 容错，不再掩盖原始异常；调度器的完整入队状态跟踪留到第 2 阶段 |
+| P1-20 | 部分缓解 | `start_worker` 改为调用 `fetch` 并处理 `RequestError`；`start_downloader` 取消全部任务的问题仍待第 2 阶段 |
+| P1-02 / P1-04 / P1-05 / P1-06 / P1-07 / P1-08 / P1-09 / P1-10 / P1-11 / P1-12 / P1-15 / P1-16 / P1-17 | Open | 按 8.11 第 2–5 阶段推进 |
+| P2-02 ~ P2-23（除 P2-01） | Open | 按 8.11 第 5 阶段收口 |
+
+当前测试基线：`uv run pytest -q` → `1 failed, 97 passed`。唯一失败为 P1-12 的 `tests/test_item.py::test_invalid_html`，与本阶段无关；`tests/test_spider.py`、`tests/test_downloader.py`、`tests/test_request.py` 全部通过且不访问网络。
 
 ## 附录 A 原版勘误表
 
