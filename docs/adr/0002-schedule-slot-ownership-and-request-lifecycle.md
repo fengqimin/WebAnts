@@ -67,7 +67,8 @@ ADR-0001 把回调与重试归位之后，剩下的结构性问题是**资源的
 
 - **I1 恰好一次**：每个 `ScheduleSlot` 至多释放一次；释放的额度必然来自同一次成功入队。未入队则不存在 slot，也就无槽可放。
 - **I2 不悬空**：任何已入队请求，要么被消费并释放，要么在关闭时被显式释放并计数；不得静默消失。
-- **I3 恒等对账**：对每个域名 `active_requests == max_domain_concurrent - available`，且 `current_requests == Σ active_requests`。
+- **I3 恒等对账**：对每个域名 `active_requests + pending_permits == max_domain_concurrent - available`，且 `current_requests == Σ active_requests`。
+  > **勘误（2026-11-04，实施期）**：原文写的是 `active_requests == max - available`。按 §2.3 步骤 2–3，域名延迟期间已经持有一个额度但尚未计入 `active_requests`，该等式在等待期必然不成立。实施为每个域名增加 `pending_permits`（已取得额度、尚未入队的数量），恒等式改为三元形式；`audit()` 的每域名输出也相应多一个 `pending` 字段。关停后 `pending` 必须为 0，此时退化为原式。
 - **I4 关停归零**：`close()` 返回后，所有域名 `active_requests == 0`、`available == max_domain_concurrent`、`current_requests == 0`、`Spider` in-flight 为空。
 
 ### 2.2 调度凭据 `ScheduleSlot`
@@ -127,6 +128,8 @@ async def schedule_request(self, request: Request) -> ScheduleResult: ...
    - `seq` 为自增序号，使队列顺序全序且稳定，调度侧从此不再依赖 `Request.__lt__`（`request.py:229`）的非严格弱序比较。
 5. **不再吞异常**：删除 `except Exception: return False`（`scheduler.py:166-168`）。可预期的拒绝必须由 `ScheduleReason` 表达；意外的 `Exception` 记录日志后向上抛出；`CancelledError` 必须原样传播（它继承 `BaseException`，现状的 `except Exception` 捕获不到，也就完全没有回滚）。
 
+> **勘误（2026-11-04，实施期）**：上述“先检查、后写入 `seen_urls`”在 `domain_delay > 0` 或额度耗尽时，检查与写入之间仍存在 `await`，并发调度同一 URL 会**全部通过去重**（实测 `domain_delay=0.05` 时 5 次并发全部 `SCHEDULED`），这正是 §1.1 记在 P1-04 名下的症状。实施增加一个同步写入的 `_reserved_urls` 预约集：去重检查同时看 `seen_urls` 与预约集，通过后在第一个 `await` 之前登记，成功入队写入 `seen_urls` 时释放，任何回滚路径（`QueueFull` / 取消 / 异常）在 `finally` 中释放。`audit()` 因此多返回一个 `reserved` 计数，用于发现“预约未回收”。
+
 ### 2.4 队列与消费
 
 - `get_request() -> ScheduleSlot | None`：返回凭据而不是裸 `Request`；队列为空时返回 `None`。
@@ -144,7 +147,8 @@ async def process_request(self, request: Request, *, slot: ScheduleSlot | None =
 ```
 
 - `slot=None` 明确表示“未经调度的直接调用”（测试、库内直接处理），不再需要 `try/except KeyError`（删除 `spider.py:434-439`）。
-- `_processing: Set[str]`（`spider.py:211`）替换为 in-flight 表 `dict[asyncio.Task, ScheduleSlot]`；`get_stats()["processing"]` 仍输出 URL 列表以兼容展示，新增 `inflight_count`。E5 的塌缩消失，退出条件改用 `inflight_count`。
+- `_processing: Set[str]`（`spider.py:211`）替换为 in-flight 表 `dict[asyncio.Task, Request]`；`get_stats()["processing"]` 仍输出 URL 列表以兼容展示，新增 `inflight_count`。E5 的塌缩消失，退出条件改用 `inflight_count`。
+  > **勘误（2026-11-04，实施期）**：本 ADR 原文此处的写法是 `dict[asyncio.Task, ScheduleSlot]`，与 §2.5 同节“`slot=None` 表示未经调度的直接调用”自相矛盾——直接调用没有 slot 可存。实施采用 `dict[asyncio.Task, Request]`：slot 已作为 `process_request` 的关键字参数随任务传递，表仅用于存活计数与 `processing` 展示，避免出现 `Optional` 值导致“计数非零但列表为空”的不一致。
 - 熔断拒绝（P1-18 已把判断移入 `try`）现在也天然释放，因为释放只依赖 `finally` 与 slot。
 
 ### 2.6 取消、超时与关闭（P1-02 / P1-20 / P2-23 消费本契约）
