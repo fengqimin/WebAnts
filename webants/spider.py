@@ -8,10 +8,12 @@ This module provides the base Spider class with the following features:
 """
 
 import asyncio
+import inspect
 import logging
 import time
-from typing import Any, AsyncGenerator, Dict, List, Optional, Set, Union, Callable
 from collections import defaultdict
+from collections.abc import Iterable
+from typing import Any, AsyncGenerator, Callable, Dict, List, Optional, Set, Union
 
 from webants.downloader import Downloader
 from webants.libs.request import Request
@@ -206,7 +208,6 @@ class Spider:
         }
 
         # Error recovery
-        self._failed_urls: Set[str] = set()
         self._processing: Set[str] = set()
         self.failure_threshold = failure_threshold
         self.recovery_timeout = recovery_timeout
@@ -297,54 +298,91 @@ class Spider:
         raise NotImplementedError
 
     async def handle_error(self, failure: Exception, request: Request) -> None:
-        """Handle request failures with circuit breaker.
+        """Default errback: log the failure.
+
+        Failure counting and circuit-breaker updates are owned by
+        ``process_request`` so custom errbacks cannot skew statistics.
 
         Args:
             failure: Exception that occurred
             request: Failed request
         """
-        self.stats["failed_requests"] += 1
-        self._failed_urls.add(request.url)
-
         domain = self._get_domain(request.url)
         circuit = self._get_circuit_breaker(domain)
-        circuit.record_failure()
-
-        if circuit.state == "open":
-            self.stats["circuits_open"] += 1
-            self.logger.warning(f"Circuit breaker opened for domain: {domain}")
-
         self.logger.error(
             f"Request failed: {request.url}, error: {str(failure)}, "
             f"retries left: {request.retries}, circuit state: {circuit.state}"
         )
 
-    async def retry_failed(self) -> None:
-        """Retry failed requests with circuit breaker check."""
-        if not self._failed_urls:
+    async def _invoke_callback(self, request: Request, response: Any) -> None:
+        """Invoke a request callback exactly once and dispatch its output.
+
+        Canonical callbacks are async generator functions. Coroutine callbacks
+        are accepted for compatibility and normalized here; Downloader never
+        invokes callbacks.
+        """
+        callback = request.callback
+        if callback is None:
             return
 
-        self.logger.info(f"Retrying {len(self._failed_urls)} failed requests")
-        for url in self._failed_urls.copy():
-            if url not in self._processing:
-                domain = self._get_domain(url)
-                circuit = self._get_circuit_breaker(domain)
+        result = callback(response, **request.cb_kwargs)
 
-                if circuit.allow_request():
-                    await self.scheduler.schedule_request(
-                        Request(
-                            url=url,
-                            callback=self.parse,
-                            errback=self.handle_error,
-                            retries=self.settings["RETRY_TIMES"],
-                            priority=100,  # High priority retry
-                        )
-                    )
-                    self._failed_urls.remove(url)
-                else:
-                    self.logger.warning(
-                        f"Retry blocked by circuit breaker for domain: {domain}"
-                    )
+        if inspect.isasyncgen(result):
+            try:
+                async for item in result:
+                    await self._dispatch_item(item)
+            finally:
+                await result.aclose()
+            return
+
+        if inspect.isawaitable(result):
+            value = await result
+            await self._consume_callback_value(request, value)
+            return
+
+        raise TypeError(
+            f"callback for {request.url} did not return a coroutine or async "
+            f"generator; got {type(result).__name__}"
+        )
+
+    async def _consume_callback_value(self, request: Request, value: Any) -> None:
+        """Normalize the value returned by a coroutine callback."""
+        if value is None:
+            return
+
+        if isinstance(value, (Request, Result)):
+            await self._dispatch_item(value)
+            return
+
+        if hasattr(value, "__aiter__"):
+            async for item in value:
+                await self._dispatch_item(item)
+            return
+
+        if isinstance(value, Iterable) and not isinstance(
+            value, (str, bytes, bytearray, dict)
+        ):
+            for item in value:
+                await self._dispatch_item(item)
+            return
+
+        raise TypeError(
+            f"callback for {request.url} returned unsupported type "
+            f"{type(value).__name__}; expected Request, Result, an iterable, "
+            f"an async iterable, or None"
+        )
+
+    async def _dispatch_item(self, item: Any) -> None:
+        """Dispatch one callback output item."""
+        if isinstance(item, Request):
+            await self.scheduler.schedule_request(item)
+        elif isinstance(item, Result):
+            self.signals.send("item_scraped", self, item=item)
+        else:
+            raise TypeError(
+                f"callback yielded unsupported type {type(item).__name__}; "
+                f"expected Request or Result"
+            )
 
     async def process_request(self, request: Request) -> None:
         """Process a single request with monitoring.
@@ -359,33 +397,46 @@ class Spider:
         domain = self._get_domain(request.url)
         circuit = self._get_circuit_breaker(domain)
 
-        if not circuit.allow_request():
-            self.logger.warning(f"Request blocked by circuit breaker: {request.url}")
-            return
-
         try:
+            if not circuit.allow_request():
+                self.logger.warning(
+                    f"Request blocked by circuit breaker: {request.url}"
+                )
+                return
+
             self.signals.send("request_scheduled", self, request=request)
             response = await self.downloader.fetch(request)
-
-            if request.callback:
-                async for result in request.callback(response):
-                    if isinstance(result, Request):
-                        await self.scheduler.schedule_request(result)
-                    elif isinstance(result, Result):
-                        self.signals.send("item_scraped", self, item=result)
+            await self._invoke_callback(request, response)
 
             circuit.record_success()
             self.stats["successful_requests"] += 1
             self.signals.send("request_finished", self, request=request, success=True)
 
         except Exception as e:
+            was_open = circuit.state == "open"
+            circuit.record_failure()
+            if not was_open and circuit.state == "open":
+                self.stats["circuits_open"] += 1
+                self.logger.warning(f"Circuit breaker opened for domain: {domain}")
+
+            self.stats["failed_requests"] += 1
             if request.errback:
-                await request.errback(e, request)
+                try:
+                    await request.errback(e, request)
+                except Exception as errback_error:
+                    self.logger.error(
+                        f"Error in errback for {request.url}: {str(errback_error)}"
+                    )
             self.signals.send("request_finished", self, request=request, success=False)
 
         finally:
-            self._processing.remove(request.url)
-            self.scheduler.request_completed(request)
+            self._processing.discard(request.url)
+            try:
+                self.scheduler.request_completed(request)
+            except KeyError:
+                self.logger.warning(
+                    f"request_completed called for unscheduled request: {request.url}"
+                )
 
             # Update timing stats
             elapsed = time.time() - start_time
@@ -419,10 +470,6 @@ class Spider:
                     continue
 
                 asyncio.create_task(self.process_request(request))
-
-                # Periodically retry failed requests
-                if self._failed_urls:
-                    await self.retry_failed()
 
         except Exception as e:
             self.logger.error(f"Spider error: {str(e)}")
@@ -458,7 +505,6 @@ class Spider:
             "scheduler_stats": self.scheduler.get_stats(),
             "parser_stats": self.parser.get_stats(),
             "downloader_stats": self.downloader.stats,
-            "failed_urls": list(self._failed_urls),
             "processing": list(self._processing),
             "circuits": {
                 domain: cb.state for domain, cb in self._domain_circuits.items()

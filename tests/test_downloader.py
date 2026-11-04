@@ -1,173 +1,269 @@
 import asyncio
-import pytest
+import json
+import logging
+from datetime import datetime, timedelta, timezone
+from email.utils import format_datetime
+from unittest.mock import AsyncMock
+
 import httpx
+import pytest
 
 from webants.downloader import Downloader
+from webants.libs.exceptions import RequestError
 from webants.libs.request import Request
-from unittest.mock import AsyncMock
-from unittest.mock import patch
 
 
-# 修改fixture作用域为function（推荐）
-@pytest.fixture(scope="function")
-def downloader():
-    """创建下载器测试实例"""
-    dl = Downloader(concurrency=2, log_level=10)
-    yield dl
+def sequence_handler(*outcomes):
+    """Return a MockTransport handler that yields outcomes in order.
+
+    Outcomes may be status codes, exceptions, or callables taking the request.
+    The last outcome repeats once the sequence is exhausted.
+    """
+    calls = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls.append(request)
+        outcome = outcomes[min(len(calls) - 1, len(outcomes) - 1)]
+        if isinstance(outcome, Exception):
+            raise outcome
+        if callable(outcome):
+            return outcome(request)
+        return httpx.Response(outcome, request=request)
+
+    handler.calls = calls
+    return handler
+
+
+async def install_handler(downloader: Downloader, handler) -> None:
+    await downloader.client.aclose()
+    downloader.client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
 
 
 @pytest.fixture
-def mock_response():
-    """模拟正常响应"""
-    response = httpx.Response(200, content=b"test data")
-    return response
+async def downloader():
+    """Offline downloader with deterministic, zero-jitter retries."""
+    dl = Downloader(concurrency=2, log_level=logging.DEBUG, retry_jitter=0)
+    dl._sleep = AsyncMock()
+    yield dl
+    await dl.close()
 
 
 @pytest.mark.asyncio
 async def test_normal_request(downloader):
-    """测试正常请求流程"""
+    handler = sequence_handler(200)
+    await install_handler(downloader, handler)
 
-    req = Request(url="https://www.httpbin.org/get?name=downloader", method="GET")
+    req = Request(url="http://example.com/get?name=downloader")
     resp = await downloader.fetch(req)
 
     assert resp.status_code == 200
-    assert resp.json()["args"]["name"] == "downloader"
+    assert len(handler.calls) == 1
+    assert downloader.stats["total_requests"] == 1
+    assert downloader.stats["total_attempts"] == 1
     assert downloader.stats["successful_requests"] == 1
-    await downloader.close()
+    assert downloader.stats["failed_requests"] == 0
 
 
 @pytest.mark.asyncio
-async def test_retry_mechanism(downloader):
-    """测试超时重试机制"""
-    req = Request(url="http://retry.com", method="GET", retries=3)
+async def test_transport_retry_then_success(downloader):
+    handler = sequence_handler(httpx.ConnectError("boom"), 200)
+    await install_handler(downloader, handler)
 
-    # 模拟第一次请求超时，后续成功
-    mock = AsyncMock()
-    mock.side_effect = [
-        httpx.RequestError("Timeout"),
-        httpx.Response(200, content=b"retry success"),
+    req = Request(url="http://retry.example.com", retries=3)
+    resp = await downloader.fetch(req)
+
+    assert resp.status_code == 200
+    assert len(handler.calls) == 2
+    assert req.retries == 3, "fetch must not mutate request.retries"
+    assert downloader.stats["total_attempts"] == 2
+    assert downloader.stats["total_retries"] == 1
+    assert downloader.stats["retry_requests"] == 1
+    assert downloader.stats["successful_requests"] == 1
+    downloader._sleep.assert_awaited_once()
+    assert downloader._sleep.await_args.args[0] == pytest.approx(1.0)
+
+
+@pytest.mark.asyncio
+async def test_status_retry_then_success(downloader):
+    handler = sequence_handler(500, 500, 200)
+    await install_handler(downloader, handler)
+
+    req = Request(url="http://status.example.com", retries=2)
+    resp = await downloader.fetch(req)
+
+    assert resp.status_code == 200
+    assert len(handler.calls) == 3
+    assert downloader.stats["total_attempts"] == 3
+    assert downloader.stats["total_retries"] == 2
+    assert downloader.stats["retry_requests"] == 1
+    assert [call.args[0] for call in downloader._sleep.await_args_list] == [
+        pytest.approx(1.0),
+        pytest.approx(2.0),
     ]
 
-    with patch.object(httpx.AsyncClient, "request", new=mock):
-        await downloader.fetch_retry(req)
-        await downloader.fetch_retry(req)  # 模拟第二次请求
 
-        assert req.retries == 2  # 剩余重试次数
-        assert downloader.stats["retry_requests"] == 1
-        assert downloader.stats["total_retries"] == 1
+@pytest.mark.asyncio
+async def test_retryable_status_exhaustion_raises(downloader):
+    handler = sequence_handler(503)
+    await install_handler(downloader, handler)
+
+    req = Request(url="http://down.example.com", retries=1)
+    with pytest.raises(RequestError) as exc_info:
+        await downloader.fetch(req)
+
+    error = exc_info.value
+    assert error.code == "RETRY_EXHAUSTED"
+    assert error.metadata["status_code"] == 503
+    assert error.metadata["attempts"] == 2
+    assert error.metadata["url"] == req.url
+    assert downloader.stats["failed_requests"] == 1
+    assert downloader.stats["retry_requests"] == 1
+    assert downloader.stats["total_attempts"] == 2
 
 
 @pytest.mark.asyncio
-async def test_http_status_retry(downloader):
-    """测试HTTP状态码触发的重试"""
-    req = Request(url="http://status.com", method="GET", retries=2)
+async def test_transport_error_exhaustion_raises(downloader):
+    handler = sequence_handler(httpx.ConnectError("boom"))
+    await install_handler(downloader, handler)
 
-    # 模拟服务端错误响应
-    error_response = httpx.Response(500)
-    success_response = httpx.Response(200)
+    req = Request(url="http://down.example.com", retries=1)
+    with pytest.raises(RequestError) as exc_info:
+        await downloader.fetch(req)
 
-    mock = AsyncMock(side_effect=[error_response, error_response, success_response])
-
-    with patch.object(httpx.AsyncClient, "request", new=mock):
-        await downloader.fetch_retry(req)  # 第一次失败
-        await downloader.fetch_retry(req)  # 第二次失败
-        result = await downloader.fetch_retry(req)  # 成功
-
-        assert result.status_code == 200
-        assert downloader.stats["total_retries"] == 2
+    error = exc_info.value
+    assert error.code == "FETCH_FAILED"
+    assert error.metadata["cause"] == "ConnectError"
+    assert error.metadata["attempts"] == 2
+    assert downloader.stats["failed_requests"] == 1
+    assert downloader.stats["total_attempts"] == 2
 
 
 @pytest.mark.asyncio
-async def test_callback_handling(downloader, mock_response):
-    """测试回调函数处理"""
+async def test_404_is_not_retried(downloader):
+    handler = sequence_handler(404)
+    await install_handler(downloader, handler)
 
-    async def test_callback(response, kwargs):
-        resp = response
-        resp.headers.update(kwargs)
-        return resp
+    req = Request(url="http://missing.example.com", retries=3)
+    resp = await downloader.fetch(req)
 
+    assert resp.status_code == 404
+    assert len(handler.calls) == 1
+    assert downloader.stats["total_retries"] == 0
+    assert downloader.stats["successful_requests"] == 1
+
+
+@pytest.mark.asyncio
+async def test_downloader_never_invokes_callback(downloader):
+    called = []
+
+    async def callback(response, **kwargs):
+        called.append(response)
+        return response
+
+    handler = sequence_handler(200)
+    await install_handler(downloader, handler)
+
+    req = Request(url="http://callback.example.com", callback=callback)
+    resp = await downloader.fetch(req)
+
+    assert resp.status_code == 200
+    assert called == [], "Downloader must not invoke request.callback"
+
+
+@pytest.mark.asyncio
+async def test_body_cookies_and_referer_are_sent(downloader):
+    captured = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured["content"] = request.content
+        captured["headers"] = request.headers
+        return httpx.Response(200, request=request)
+
+    await install_handler(downloader, handler)
+
+    referer = Request(url="http://ref.example.com/")
     req = Request(
-        url="http://callback.com",
-        method="GET",
-        callback=test_callback,
-        cb_kwargs={"X-Test": "true"},
+        url="http://example.com/post",
+        method="POST",
+        body={"name": "downloader"},
+        cookies={"sid": "abc"},
+        headers={"X-Test": "1"},
+        referer=referer,
+    )
+    await downloader.fetch(req)
+
+    assert json.loads(captured["content"]) == {"name": "downloader"}
+    assert captured["headers"]["X-Test"] == "1"
+    assert "sid=abc" in captured["headers"]["cookie"]
+    assert captured["headers"]["referer"] == "http://ref.example.com/"
+
+
+@pytest.mark.asyncio
+async def test_retry_after_seconds_is_honored(downloader):
+    def too_many_requests(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            429, headers={"Retry-After": "7"}, request=request
+        )
+
+    handler = sequence_handler(too_many_requests, 200)
+    await install_handler(downloader, handler)
+
+    req = Request(url="http://rate-limited.example.com", retries=1)
+    resp = await downloader.fetch(req)
+
+    assert resp.status_code == 200
+    delays = [call.args[0] for call in downloader._sleep.await_args_list]
+    assert delays == [pytest.approx(7.0)]
+
+
+def test_retry_after_http_date_is_parsed():
+    future = datetime.now(timezone.utc) + timedelta(seconds=30)
+    response = httpx.Response(
+        503,
+        headers={"Retry-After": format_datetime(future, usegmt=True)},
     )
 
-    with patch.object(
-        httpx.AsyncClient, "request", new=AsyncMock(return_value=mock_response)
-    ):
-        resp = await downloader.fetch(req)
+    delay = Downloader._parse_retry_after(response)
 
-        assert resp.headers["X-Test"] == "true"
-        assert downloader.stats["successful_requests"] == 1
+    assert delay is not None
+    assert 20 <= delay <= 40
 
 
 @pytest.mark.asyncio
 async def test_statistics_accuracy(downloader):
-    """验证统计系统准确性"""
-    requests = [
-        Request(url=f"http://stat-test.com/{i}", method="GET", delay=0.1)
-        for i in range(5)
-    ]
+    handler = sequence_handler(200)
+    await install_handler(downloader, handler)
 
-    with patch.object(
-        httpx.AsyncClient, "request", new=AsyncMock(return_value=httpx.Response(200))
-    ):
-        for req in requests:
-            await downloader.fetch(req)
+    for index in range(5):
+        await downloader.fetch(Request(url=f"http://stats.example.com/{index}"))
 
     assert downloader.stats["total_requests"] == 5
+    assert downloader.stats["total_attempts"] == 5
     assert downloader.stats["successful_requests"] == 5
-    assert downloader.stats["min_response_time"] > 0
-    assert downloader.stats["max_response_time"] <= downloader.timeout.connect
+    assert downloader.stats["failed_requests"] == 0
+    assert downloader.stats["min_response_time"] >= 0
+    assert downloader.stats["max_response_time"] >= downloader.stats["min_response_time"]
 
 
 @pytest.mark.asyncio
 async def test_concurrency_control(downloader):
-    """测试并发控制有效性"""
     sem = downloader.sem
     initial_value = sem._value
 
     async with sem:
         assert sem._value == initial_value - 1
-        await asyncio.sleep(0.1)
+        await asyncio.sleep(0)
 
     assert sem._value == initial_value
 
 
 @pytest.mark.asyncio
-async def test_callback_exception_handling(downloader, mock_response):
-    """测试回调函数异常处理"""
+async def test_fetch_retry_alias_delegates_to_fetch(downloader):
+    handler = sequence_handler(200)
+    await install_handler(downloader, handler)
 
-    async def faulty_callback(response, kwargs):
-        raise ValueError("Simulated callback error")
+    req = Request(url="http://alias.example.com")
+    resp = await downloader.fetch_retry(req)
 
-    req = Request(
-        url="http://callback-error.com",
-        method="GET",
-        callback=faulty_callback,
-        retries=0,
-    )
-
-    with patch.object(
-        downloader, "_fetch", new=AsyncMock(return_value=req)
-    ):
-        await downloader.fetch_retry(req)
-
-        assert downloader.stats["failed_requests"] == 1
-
-
-@pytest.mark.parametrize("status_code,expected_retries", [(429, 3), (500, 3), (200, 0)])
-@pytest.mark.asyncio
-async def test_retry_strategies(downloader, status_code, expected_retries):
-    """参数化测试不同状态码的重试策略"""
-    req = Request(url=f"http://status-{status_code}.com", method="GET")
-
-    mock = AsyncMock(return_value=httpx.Response(status_code))
-    with patch.object(httpx.AsyncClient, "request", new=mock):
-        result = await downloader.fetch_retry(req)
-
-    if status_code in Downloader.RETRY_CODES:
-        assert req.retries == 5 - expected_retries
-    else:
-        assert result.status_code == status_code
+    assert resp.status_code == 200
+    assert downloader.stats["total_attempts"] == 1

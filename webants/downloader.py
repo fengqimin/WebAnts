@@ -9,12 +9,16 @@ This module provides downloading functionality with the following features:
 
 import asyncio
 import logging
+import random
 import time
 from abc import abstractmethod
+from datetime import datetime, timezone
+from email.utils import parsedate_to_datetime
 from typing import Optional, Union
 
 import httpx
 
+from webants.libs.exceptions import RequestError
 from webants.libs.request import Request
 from webants.utils.logger import get_logger
 
@@ -84,18 +88,9 @@ class BaseDownloader:
 class Downloader(BaseDownloader):
     """Concrete implementation of downloader using httpx library."""
 
-    # Define retry strategies for different error types
-    RETRY_CODES = {
-        403: {"max_retries": 5, "backoff_factor": 2},  # Forbidden
-        404: {"max_retries": 5, "backoff_factor": 2},  # Not Found
-        408: {"max_retries": 3, "backoff_factor": 2},  # Request Timeout
-        420: {"max_retries": 3, "backoff_factor": 2},  # Bad Request
-        429: {"max_retries": 3, "backoff_factor": 5},  # Too Many Requests
-        500: {"max_retries": 3, "backoff_factor": 2},  # Server Error
-        502: {"max_retries": 3, "backoff_factor": 2},  # Bad Gateway
-        503: {"max_retries": 3, "backoff_factor": 2},  # Service Unavailable
-        504: {"max_retries": 3, "backoff_factor": 2},  # Gateway Timeout
-    }
+    # Status codes retried by default. 403/404/420 are deliberately excluded:
+    # they are deterministic client/response states, not transient failures.
+    DEFAULT_RETRY_STATUS_CODES = frozenset({408, 425, 429, 500, 502, 503, 504})
 
     def __init__(
         self,
@@ -133,6 +128,7 @@ class Downloader(BaseDownloader):
         # Statistics
         self.stats: dict[str, int | float] = {
             "total_requests": 0,
+            "total_attempts": 0,
             "successful_requests": 0,
             "failed_requests": 0,
             "retry_requests": 0,
@@ -164,8 +160,16 @@ class Downloader(BaseDownloader):
         self.client = self._setup_http_client()
 
         # retry mechanism
-        self.retry_delay = kwargs.get("retry_delay", 1)
-        self.retry_requests = set()
+        self.retry_delay = kwargs.get("retry_delay", 1.0)
+        self.retry_backoff_factor = kwargs.get("retry_backoff_factor", 2.0)
+        self.retry_max_delay = kwargs.get("retry_max_delay", 60.0)
+        self.retry_jitter = kwargs.get("retry_jitter", 0.25)
+        retry_status_codes = kwargs.get("retry_status_codes")
+        self.retry_status_codes = (
+            frozenset(retry_status_codes)
+            if retry_status_codes is not None
+            else self.DEFAULT_RETRY_STATUS_CODES
+        )
 
     def _setup_timeout(self, timeout: Union[float, dict]) -> httpx.Timeout:
         """Setup request timeout configuration."""
@@ -202,188 +206,247 @@ class Downloader(BaseDownloader):
             http2=self.http2,
         )
 
-    async def _fetch(self, request: Request) -> Union[httpx.Response, Request]:
-        """Fetch a resource based on the request with advanced error handling.
+    async def _fetch(self, request: Request) -> httpx.Response:
+        """Perform a single HTTP attempt.
+
+        This method never calls ``request.callback`` and never swallows
+        transport errors: retry decisions belong to :meth:`fetch`.
 
         Args:
             request: Request object containing URL and parameters
 
         Returns:
-            Either a successful response or the original request for retry
+            The raw ``httpx.Response`` for this attempt.
+
+        Raises:
+            httpx.HTTPError: On transport-level failures.
         """
-        start_time = time.time()
-        delay = request.delay or self.delay
-        self.logger.debug(f"Fetching {request}, delay: {delay}s")
-        await asyncio.sleep(delay)
-
+        start_time = time.perf_counter()
         headers = request.headers or self.headers
-        if request.url not in self.retry_requests:
-            self.stats["total_requests"] += 1
 
-        try:
-            response = await self.client.request(
-                method=request.method,
-                url=request.url,
-                headers=headers,
-                timeout=request.timeout or self.timeout,
+        request_kwargs: dict = {
+            "method": request.method,
+            "url": request.url,
+            "headers": headers,
+            "timeout": request.timeout or self.timeout,
+        }
+        if request.cookies:
+            # httpx 0.28 deprecates per-request cookies=. Merge the client jar
+            # with request-level cookies and send an explicit Cookie header so
+            # cookies are actually transmitted without mutating client state.
+            merged_cookies: dict[str, str] = {
+                cookie.name: cookie.value for cookie in self.client.cookies.jar
+            }
+            merged_cookies.update(
+                {str(name): str(value) for name, value in request.cookies.items()}
             )
+            request_kwargs["headers"] = {
+                **headers,
+                "Cookie": "; ".join(
+                    f"{name}={value}" for name, value in merged_cookies.items()
+                ),
+            }
+        if request.body is not None:
+            if isinstance(request.body, dict):
+                request_kwargs["json"] = request.body
+            else:
+                request_kwargs["content"] = request.body
+        if request.referer is not None:
+            request_kwargs["headers"] = {
+                **request_kwargs["headers"],
+                "Referer": getattr(request.referer, "url", str(request.referer)),
+            }
 
-            elapsed = time.time() - start_time
-            self._update_stats(elapsed)
+        response = await self.client.request(**request_kwargs)
 
-            # Log detailed request information
-            self.logger.info(
-                f"Request completed - {request}, "
-                f"Status: {response.status_code}, "
-                f"Time: {elapsed:.3f}s"
-            )
-            if response.status_code not in self.RETRY_CODES:
-                self.stats["successful_requests"] += 1
-
-            return response
-
-        except httpx.HTTPError as e:
-            elapsed = time.time() - start_time
-            self._update_stats(elapsed)
-            self.stats["failed_requests"] += 1
-
-            self.logger.error(
-                f"HTTP Error: {str(e)}, {request}, "
-                f"Retries left: {request.retries - 1}, "
-                f"Time: {elapsed:.2f}s"
-            )
-            return request
-
-        except Exception as e:
-            self.stats["failed_requests"] += 1
-            self.logger.error(f"Unexpected error: {str(e)}, {request}")
-
-            return request
+        elapsed = time.perf_counter() - start_time
+        self._update_stats(elapsed)
+        self.logger.info(
+            f"Request completed - {request}, "
+            f"Status: {response.status_code}, "
+            f"Time: {elapsed:.3f}s"
+        )
+        return response
 
     def _update_stats(self, elapsed: float) -> None:
         """Update response time statistics."""
         self.stats["total_time"] += elapsed
         self.stats["min_response_time"] = min(self.stats["min_response_time"], elapsed)
         self.stats["max_response_time"] = max(self.stats["max_response_time"], elapsed)
-        total_requests = (
-            self.stats["successful_requests"] + self.stats["failed_requests"]
-        )
-        if total_requests > 0:
-            self.stats["avg_response_time"] = self.stats["total_time"] / total_requests
+        total_attempts = self.stats["total_attempts"]
+        if total_attempts > 0:
+            self.stats["avg_response_time"] = self.stats["total_time"] / total_attempts
 
-    def _retry_request(self, request: Request) -> Request:
-        """Retry a request by re-queuing it with adjusted priority."""
-        self.stats["total_retries"] += 1
+    async def _sleep(self, seconds: float) -> None:
+        """Sleep between attempts.
 
-        request.retries -= 1
-        request.priority += 10  # Lower priority for retry requests
+        Kept as a separate method so tests can inject a no-op or fake clock
+        without waiting for real backoff delays.
+        """
+        if seconds > 0:
+            await asyncio.sleep(seconds)
 
-        if request.url not in self.retry_requests:
-            self.stats["retry_requests"] += 1
-            self.retry_requests.add(request.url)
-
-        self.request_queue.put_nowait((request.priority, request))
-
-        return request
-
-    async def fetch_retry(self, request: Request) -> Optional[httpx.Response]:
-        """Fetch resources using an adaptive retry mechanism with exponential backoff strategy.
-
-        This method implements a smart retry mechanism with the following features:
-        1. Conditional retry based on HTTP status codes
-        2. Exponential backoff algorithm to avoid frequent retries
-        3. Dynamic request priority adjustment
-        4. Detailed retry status tracking
+    def _compute_backoff(self, retry_index: int) -> float:
+        """Compute exponential backoff with optional jitter.
 
         Args:
-            request: Request object containing URL and other parameters
+            retry_index: Zero-based index of the retry (0 = first retry).
+        """
+        delay = self.retry_delay * (self.retry_backoff_factor**retry_index)
+        delay = min(delay, self.retry_max_delay)
+        if self.retry_jitter > 0:
+            delay *= 1 + self.retry_jitter * random.random()
+        return delay
+
+    @staticmethod
+    def _parse_retry_after(response: httpx.Response) -> Optional[float]:
+        """Parse ``Retry-After`` as seconds or an HTTP date.
 
         Returns:
-            Response object on success, None during retry, failed response when retries exhausted
+            Non-negative delay in seconds, or ``None`` if absent/invalid.
         """
+        value = response.headers.get("Retry-After")
+        if not value:
+            return None
 
-        result = await self._fetch(request)
-
-        if isinstance(result, httpx.Response):
-            # Handle HTTP status code triggered retries
-            if result.status_code in self.RETRY_CODES:
-                if request.retries > 0:
-                    retry_config = self.RETRY_CODES[result.status_code]
-                    # Calculate exponential backoff delay
-                    backoff_delay = self.retry_delay * (
-                        retry_config["backoff_factor"]
-                        ** (retry_config["max_retries"] - request.retries)
-                    )
-
-                    # Update request status
-                    request.delay = backoff_delay
-
-                    request = self._retry_request(request)
-
-                    # Log retry status
-                    self.logger.warning(
-                        f"Retrying request - {request}, "
-                        f"Status code: {result.status_code}, "
-                        f"Retries remaining: {request.retries}, "
-                        f"New priority: {request.priority}, "
-                        f"Delay: {backoff_delay:.2f}s"
-                    )
-
+        value = value.strip()
+        try:
+            seconds = float(value)
+        except ValueError:
+            try:
+                retry_at = parsedate_to_datetime(value)
+            except (TypeError, ValueError, OverflowError):
                 return None
+            if retry_at.tzinfo is None:
+                retry_at = retry_at.replace(tzinfo=timezone.utc)
+            seconds = (retry_at - datetime.now(timezone.utc)).total_seconds()
 
-            # Handle successful response
-            if request.callback is None:
-                return result
-            return await request.callback(result, request.cb_kwargs)
+        return max(0.0, seconds)
 
-        # Handle request exception triggered retries
-        elif isinstance(result, Request):
-            if request.retries > 0:
-                request = self._retry_request(request)
-
-                self.logger.warning(
-                    f"Request failed, retrying : {request}, "
-                    f"Retries remaining: {request.retries}, "
-                    f"New priority: {request.priority}"
-                )
-                return None
-            else:
-                # Retries exhausted, return failure response
-                self.logger.error(
-                    f"Request finally failed: {request}, Retries exhausted"
-                )
-                self.stats["failed_requests"] += 1
-                return httpx.Response(
-                    status_code=600,  # Custom status code indicating retry failure
-                    extensions={"Request": request, "retry_exhausted": True},
-                )
+    def _record_final_result(self, *, success: bool, retried: bool) -> None:
+        """Record one logical request's final outcome exactly once."""
+        if retried:
+            self.stats["retry_requests"] += 1
+        if success:
+            self.stats["successful_requests"] += 1
+        else:
+            self.stats["failed_requests"] += 1
 
     async def fetch(self, request: Request) -> httpx.Response:
-        """Fetch a resource based on the request.
+        """Fetch a resource, retrying transient failures.
+
+        Retry ownership: this method retries transport errors and configured
+        retryable status codes internally. It never invokes ``request.callback``;
+        Spider is responsible for calling callbacks exactly once per logical
+        request.
 
         Args:
             request: Request object containing URL and other parameters
 
         Returns:
-            Response object
+            The final non-retryable ``httpx.Response``.
+
+        Raises:
+            RequestError: If transport errors or retryable status codes are
+                exhausted.
         """
+        max_attempts = max(1, request.retries + 1)
+        self.stats["total_requests"] += 1
 
-        result = await self._fetch(request)
-        if isinstance(result, httpx.Response):
-            if request.callback is None:
-                return result
-            return await request.callback(result, request.cb_kwargs)
+        pre_delay = request.delay or self.delay
+        if pre_delay > 0:
+            self.logger.debug(f"Fetching {request}, delay: {pre_delay}s")
+            await self._sleep(pre_delay)
 
-        elif isinstance(result, Request):
-            return httpx.Response(status_code=600, extensions={"Request": request})
+        retried = False
+        last_error: Optional[httpx.HTTPError] = None
+        last_response: Optional[httpx.Response] = None
+
+        for attempt in range(max_attempts):
+            if attempt > 0:
+                retried = True
+                self.stats["total_retries"] += 1
+                delay = self._compute_backoff(attempt - 1)
+                if last_response is not None:
+                    retry_after = self._parse_retry_after(last_response)
+                    if retry_after is not None:
+                        delay = max(delay, retry_after)
+                self.logger.warning(
+                    f"Retrying request - {request}, "
+                    f"attempt {attempt + 1}/{max_attempts}, delay: {delay:.2f}s"
+                )
+                await self._sleep(delay)
+
+            self.stats["total_attempts"] += 1
+            try:
+                response = await self._fetch(request)
+            except httpx.HTTPError as exc:
+                last_error = exc
+                last_response = None
+                if attempt + 1 >= max_attempts:
+                    self._record_final_result(success=False, retried=retried)
+                    raise RequestError(
+                        f"Fetch failed after {attempt + 1} attempt(s): {exc}",
+                        code="FETCH_FAILED",
+                        retryable=False,
+                        metadata={
+                            "url": request.url,
+                            "attempts": attempt + 1,
+                            "cause": type(exc).__name__,
+                        },
+                    ) from exc
+                continue
+
+            if response.status_code in self.retry_status_codes:
+                last_response = response
+                last_error = None
+                if attempt + 1 >= max_attempts:
+                    self._record_final_result(success=False, retried=retried)
+                    raise RequestError(
+                        f"Retryable status {response.status_code} after "
+                        f"{attempt + 1} attempt(s)",
+                        code="RETRY_EXHAUSTED",
+                        retryable=False,
+                        metadata={
+                            "url": request.url,
+                            "status_code": response.status_code,
+                            "headers": dict(response.headers),
+                            "attempts": attempt + 1,
+                        },
+                    )
+                continue
+
+            self._record_final_result(success=True, retried=retried)
+            return response
+
+        # Defensive fallback: the loop always returns or raises.
+        self._record_final_result(success=False, retried=retried)
+        raise RequestError(
+            f"Fetch failed: {last_error}",
+            code="FETCH_FAILED",
+            retryable=False,
+            metadata={"url": request.url, "attempts": max_attempts},
+        )
+
+    async def fetch_retry(self, request: Request) -> httpx.Response:
+        """Deprecated compatibility alias for :meth:`fetch`."""
+        return await self.fetch(request)
 
     async def start_worker(self) -> None:
-        """Process queue items forever."""
+        """Process queue items forever.
+
+        Worker mode is a compatibility adapter: only successful responses are
+        queued; final failures are logged. Spider does not use this path.
+        """
 
         while True:
             async with self.sem:
                 request = await self._next_request()
-                resp = await self.fetch_retry(request)
+                try:
+                    resp = await self.fetch(request)
+                except RequestError as exc:
+                    self.logger.error(f"Request failed permanently: {exc}")
+                    resp = None
 
                 if self.response_queue and resp:
                     self.response_queue.put_nowait(resp)

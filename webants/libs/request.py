@@ -8,7 +8,7 @@ This module provides a robust Request class with:
 - Priority queueing support
 """
 
-from asyncio import iscoroutinefunction
+import inspect
 from typing import Any, Callable, Dict, Optional, Union
 from urllib.parse import urlparse
 
@@ -108,14 +108,9 @@ class Request:
         self.encoding = encoding
 
         # Validation for callback functions
-        if callback:
-            assert iscoroutinefunction(callback), (
-                f"callback must be a coroutine function, got {callback.__name__}"
-            )
-        if errback:
-            assert iscoroutinefunction(errback), (
-                f"errback must be a coroutine function, got {errback.__name__}"
-            )
+        self._validate_callback(callback, "callback", allow_asyncgen=True)
+        self._validate_callback(errback, "errback", allow_asyncgen=False)
+        self._validate_cb_kwargs(cb_kwargs)
 
         self.callback = callback
         self.errback = errback
@@ -167,6 +162,65 @@ class Request:
         parsed = urlparse(url)
         if not all([parsed.scheme, parsed.netloc]):
             raise ValueError(f"Invalid URL: {url}")
+
+    @staticmethod
+    def _validate_callback(
+        callback: Optional[Callable],
+        name: str,
+        *,
+        allow_asyncgen: bool,
+    ) -> None:
+        """Validate a callback or errback.
+
+        callback may be a coroutine function or an async generator function.
+        errback must be a coroutine function.
+
+        Raises:
+            TypeError: If the callable has an unsupported shape.
+        """
+        if callback is None:
+            return
+        if not callable(callback):
+            raise TypeError(
+                f"{name} must be callable, got {type(callback).__name__}"
+            )
+
+        target = inspect.unwrap(callback)
+        is_coroutine = inspect.iscoroutinefunction(target)
+        is_asyncgen = inspect.isasyncgenfunction(target)
+
+        if allow_asyncgen:
+            valid = is_coroutine or is_asyncgen
+            expected = "a coroutine function or an async generator function"
+        else:
+            valid = is_coroutine
+            expected = "a coroutine function"
+
+        if not valid:
+            callable_name = getattr(target, "__name__", type(target).__name__)
+            raise TypeError(f"{name} must be {expected}, got {callable_name}")
+
+    @staticmethod
+    def _validate_cb_kwargs(cb_kwargs: Optional[Dict]) -> None:
+        """Validate callback keyword arguments.
+
+        ``response`` is reserved for the first positional argument and must not
+        appear in ``cb_kwargs``. All keys must be strings, as required by the
+        ``**`` call syntax.
+        """
+        if cb_kwargs is None:
+            return
+        if not isinstance(cb_kwargs, dict):
+            raise TypeError(
+                f"cb_kwargs must be a dict, got {type(cb_kwargs).__name__}"
+            )
+        if "response" in cb_kwargs:
+            raise TypeError("cb_kwargs must not contain the reserved key 'response'")
+        non_string_keys = [key for key in cb_kwargs if not isinstance(key, str)]
+        if non_string_keys:
+            raise TypeError(
+                f"cb_kwargs keys must be str, got {non_string_keys!r}"
+            )
 
     def __repr__(self) -> str:
         """String representation."""
