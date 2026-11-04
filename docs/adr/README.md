@@ -16,6 +16,7 @@
 | 编号 | 标题 | 状态 | 日期 | 关联问题 |
 |------|------|------|------|----------|
 | [ADR-0001](0001-callback-contract-and-retry-ownership.md) | 回调契约与重试归属 | Accepted | 2026-11-04 | P0-01、P1-03、P1-14、P1-19、P2-01 |
+| [ADR-0002](0002-schedule-slot-ownership-and-request-lifecycle.md) | 调度槽位所有权与请求生命周期 | Accepted | 2026-11-04 | P1-01、P1-02、P1-04、P1-18、P1-20、P2-20、P2-23 |
 
 ## 新增约定
 
