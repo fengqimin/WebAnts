@@ -2,12 +2,12 @@
 
 | 项目 | 内容 |
 |------|------|
-| 状态 | **Proposed（待评审）** |
-| 日期 | 2026-11-04 |
+| 状态 | **Accepted（2026-11-04）** |
+| 日期 | 2026-11-04（起草并接受） |
 | 基线 | `master @ 23f8051` |
 | 关联问题 | P0-01、P1-03、P1-13、P1-14、P1-19、P2-01、P2-02、P2-18 |
 | 关联文档 | [08 §8.11 阶段 0](../wiki/08-issues-and-recommendations.md)、[03 爬虫主链路](../wiki/03-crawler.md) |
-| 决策者 | 项目维护者（评审后改为 Accepted） |
+| 决策者 | 项目维护者 |
 
 > 本文是接口与职责的决策记录，**不是已实现代码**。文中的签名、伪代码和实施拆解用于冻结方案，具体实现需另行提交。
 
@@ -314,13 +314,17 @@ sequenceDiagram
 - [ ] 熔断器对一次逻辑失败只记录一次，不按尝试次数累加。
 - [ ] `uv run pytest -q tests/test_spider.py tests/test_downloader.py` 全绿且不访问网络。
 
-## 8. 未决问题（评审时确认）
+## 8. 评审结论
 
-1. `Request.retries` 是否在下一个大版本改名为 `max_retries`，以避免“剩余次数 vs 总次数”的歧义？本 ADR 暂保持字段名不变。
-2. `Retry-After` 的 HTTP-date 解析是否首版就支持？本 ADR 建议支持，但允许拆成后续小任务。
-3. worker 模式（`start_worker`/`start_downloader`）是保留、改造还是废弃？建议另开 ADR，不阻塞本决策。
-4. `RETRY_EXHAUSTED` 的 `metadata` 是否携带完整 `httpx.Response`？携带利于排障，但会延长大响应体的生命周期；建议只带 `status_code`、`headers` 与 `url`。
-5. 是否需要在 `errback` 中提供 `**cb_kwargs`？本 ADR 选择不提供，保持签名稳定；如有需要，可通过 `request.cb_kwargs` 读取。
+原 5 个未决点按建议默认处理，随 ADR 接受一并冻结：
+
+| # | 问题 | 结论 |
+|---|------|------|
+| 1 | `Request.retries` 是否改名为 `max_retries` | **保持 `retries` 不变**。定义为“首次尝试之外的额外重试次数”；改名留到下一个大版本，避免与本次契约重构叠加破坏 |
+| 2 | `Retry-After` 的 HTTP-date 是否首版支持 | **首版同时支持秒数与 HTTP-date**。若排期紧张，可拆为 C2b 小任务，但对外契约不变 |
+| 3 | worker 模式（`start_worker`/`start_downloader`）的去留 | **本次仅改造为 `fetch` 的兼容适配器**：只入队成功响应，失败记录日志；是否废弃另开 ADR，不阻塞本决策 |
+| 4 | `RETRY_EXHAUSTED` 的 `metadata` 是否携带完整 Response | **不携带完整响应体**。只带 `status_code`、`headers`、`url`、`attempts`，避免延长大响应生命周期 |
+| 5 | errback 是否接收 `**cb_kwargs` | **不接收**。errback 固定签名 `(error, request)`；需要时从 `request.cb_kwargs` 读取 |
 
 ## 9. 参考
 

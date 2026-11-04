@@ -153,7 +153,7 @@ flowchart TD
 | 可选层不接入 Spider | 构造函数注入 | 使用方必须自行组装，默认行为与文档中的“支持中间件/持久化”不一致 |
 | 解析结果用 pydantic `Field` 包装 | 直接存原始值 | 每个值带 source/extractor/timestamp/metadata，便于溯源但体积大 |
 
-> 回调契约与重试归属的正式决策见 [ADR-0001](../adr/0001-callback-contract-and-retry-ownership.md)（Proposed）。该 ADR 接受后，本节中与 P0-01 相关的取舍以 ADR 为准。
+> 回调契约与重试归属的正式决策见 [ADR-0001](../adr/0001-callback-contract-and-retry-ownership.md)（Accepted，2026-11-04）。本节中与 P0-01 相关的取舍以 ADR 为准。
 
 ## 1.8 非功能特性
 
