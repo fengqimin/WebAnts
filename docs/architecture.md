@@ -115,6 +115,8 @@ graph TD
     PS --> MISC
 ```
 
+> **可选层接入（ADR-0005）**：`MiddlewareManager`、`PersisterManager` 与 `Config` 通过 `Spider(config=..., middleware=..., persister=...)` 显式注入；未注入时行为与旧版一致。注入的 persister 在 `Spider.close()` 时 flush + close。异步 `SignalManager` 仍为实验性，不随 Spider 生命周期触发。
+
 ## 二、数据流图
 
 ### 2.1 主数据流（Request/Response 生命周期）

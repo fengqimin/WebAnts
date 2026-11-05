@@ -28,7 +28,7 @@
 
 | 验证项 | 命令 / 脚本 | 实际结果 |
 |--------|-------------|----------|
-| 测试套件 | `uv run pytest -q` | `124 passed`，无失败用例 |
+| 测试套件 | `uv run pytest -q` | `212 passed`，无失败用例 |
 | Lint | `uv run ruff check .` | `Found 17 errors`，全部 `F401` |
 | 导入排序 | `uv run isort --check .` / `uv run python -m isort --check-only .` | CLI 入口报 `Failed to canonicalize script path`；改用模块方式后 **17 个文件不合格，2 个跳过** |
 | 格式检查 | `uv run black --check .` | `Failed to canonicalize script path`，无法运行；且 `dev` 依赖组未声明 black |
@@ -115,7 +115,7 @@
 | **A. 下载职责** | P0-01、P1-03、P1-13、P1-14、P1-19、P2-01、P2-02、P2-18 | Downloader 同时承担下载、重试、回调、失败包装四种职责 | 先定契约，再一次改完 |
 | **B. 生命周期** | P1-01、P1-02、P1-04、P1-18、P1-20、P2-20、P2-23 | 资源获取与释放不在同一层级，缺少 `finally` 兜底 | 与 A 可并行 |
 | **C. 数据正确性** | P1-05、P1-06、P1-07、P1-08、P1-15、P1-16、P1-17、P2-15、P2-16、P2-17 | 过滤/合并/缓存/排序的边界语义不一致 | 可并行 |
-| **D. 可选层** | P1-09、P1-10、P1-11、P2-08、P2-09、P2-19 | 能力已实现但未接入，且缺少关闭语义 | 先文档隔离，再接入 |
+| **D. 可选层** | P1-09、P1-10、P1-11、P2-08、P2-09、P2-19 | 能力已实现但未接入，且缺少关闭语义 | 已按 ADR-0005 完成接入；P2-08/P2-09 留给阶段 5 |
 | **E. 工程质量** | P1-12、P2-04、P2-05、P2-06、P2-13、P2-14 | 缺少 CI 与统一命令 | 最后收口 |
 
 ```mermaid
@@ -361,6 +361,8 @@ for priority, receiver in sorted(receivers, key=lambda x: (-x[0], x[1])):
 
 ### P1-09 Persister 无 flush/close
 
+> **状态：Closed（2026-11-05）。** 修复依据 [ADR-0005](../adr/0005-optional-layer-wiring-and-persistence-lifecycle.md)：`BasePersister` 增加实例锁、`flush/close`/异步上下文；三个后端在成功写批后清空批次并记录 `total_written`；`Spider.close()` 在关闭 downloader 前 flush + close 注入的 persister。测试见 `tests/test_persister.py`、`tests/test_spider_optional.py`。
+
 三个后端都只有 `save`/`load`/`_write_batch`，`_batch` 达到 `batch_size` 才写（`webants/libs/persister.py:139-140,253-254,389-390`），没有公开的 `flush()` 或 `close()`。进程正常退出时，尾部不足 100 条的数据全部丢失。SQLite 每次写入都新建连接，也没有显式关闭语义。
 
 **修复**：在 `BasePersister` 增加：
@@ -377,11 +379,15 @@ async def close(self) -> None:
 
 ### P1-10 ResponseCache 破坏中间件链
 
+> **状态：Closed（2026-11-05）。** 修复依据 [ADR-0005](../adr/0005-optional-layer-wiring-and-persistence-lifecycle.md)：新增 `Middleware.lookup` 阶段，`ResponseCache` 命中只从 `lookup` 返回响应；`process_request` 改为透传，`MiddlewareManager` 校验请求链返回值必须是 `Request | None`。测试见 `tests/test_middleware.py`。
+
 `ResponseCache.process_request` 命中缓存时 `return response`（`webants/libs/middleware.py:408`），但 `MiddlewareManager.process_request` 把返回值当作 `current_request` 继续传给下一个中间件（`:489-505`）。后续中间件会对 `httpx.Response` 调用 `process_request`，语义完全错位。
 
 **修复**：缓存命中不应通过 request 链返回。可以抛一个 `CacheHit(response)` 控制流异常，或在 Manager 中定义独立的 `lookup(request)` 阶段。返回类型应严格为 `Optional[Request]`。
 
 ### P1-11 可选层未接入
+
+> **状态：Closed（2026-11-05）。** 修复依据 [ADR-0005](../adr/0005-optional-layer-wiring-and-persistence-lifecycle.md)：`Spider` 显式注入 `config/middleware/persister`，请求流水线接入 `lookup`/`process_request`/`process_response`/`process_exception`，`Result` 分发后持久化，关闭时 flush。异步 `SignalManager` 按该 ADR 明确标注为实验性、未桥接生命周期，桥接条件见 [待办 BL-001](../backlog.md#bl-001-异步信号桥接)。测试见 `tests/test_spider_optional.py`、`tests/test_config.py`。
 
 grep 结果显示，除 `libs/middleware.py:25` 引用 `libs/signals.py` 外，没有任何核心模块 import `persister`、`config`、`middleware` 或 `utils.statistic`。因此：
 
@@ -401,7 +407,7 @@ grep 结果显示，除 `libs/middleware.py:25` 引用 `libs/signals.py` 外，�
 
 **建议**：删除或改写失败用例（若要保留校验，应在 `_Item` 上增加 `html` 描述符）；为 Spider 增加 mock 测试；把网络用例标记为 `integration` 并默认跳过。
 
-**落地（2026-11-05）**：采用“保留校验”方案——`_Item.html` 改为 property，只接受 `str` / `etree._Element` / `None`（构造期允许 `None`），非法类型抛 `TypeError`（不用 `assert`，避免 `python -O` 失效）；`test_invalid_html` 同步改为断言 `TypeError`，并补充字符串与 lxml 元素两种合法输入。Spider 与 Downloader 的离线用例已在前序阶段补齐，`uv run pytest -q` 现为 `124 passed`。
+**落地（2026-11-05）**：采用“保留校验”方案——`_Item.html` 改为 property，只接受 `str` / `etree._Element` / `None`（构造期允许 `None`），非法类型抛 `TypeError`（不用 `assert`，避免 `python -O` 失效）；`test_invalid_html` 同步改为断言 `TypeError`，并补充字符串与 lxml 元素两种合法输入。Spider 与 Downloader 的离线用例已在前序阶段补齐，`uv run pytest -q` 现为 `212 passed`。
 
 ### P1-13 body/cookies 未发送
 
@@ -567,7 +573,7 @@ await self.request_queue.put((request.priority, request))
 | P2-16 | 环境变量名不能含 `.`，`_set_nested_value` 却按 `.` 拆分（`webants/libs/config.py:122-137`） | **Closed（2026-11-05，ADR-0004）**：改用 `__` 分隔；未知键忽略并告警，类型不匹配回退 |
 | P2-17 | `lru_cache` 返回同一个可变 lxml 树（`webants/parser.py:74-96`） | **Closed（2026-11-05，ADR-0004）**：`parse()` 每次返回深拷贝，缓存树不逃逸 |
 | P2-18 | `Request` 总是填充默认 headers（`webants/libs/request.py:105`），`_fetch` 的 `request.headers or self.headers` 永远取前者（`webants/downloader.py:219`） | 改为合并：`{**self.headers, **request.headers}`，或区分“显式 headers” |
-| P2-19 | `JsonPersister._write_batch` 每批全量读改写（`webants/libs/persister.py:181-202`），非原子 | 改 NDJSON 追加写，或临时文件 + `os.replace` 原子替换 |
+| P2-19 | `JsonPersister._write_batch` 每批全量读改写（`webants/libs/persister.py:181-202`），非原子 | **Closed（2026-11-05，ADR-0005）**：改为 NDJSON 追加写；旧 JSON 数组在下一次写入时用临时文件 + `os.replace` 原子迁移；坏行跳过并计 `load_errors` |
 | P2-20 | `_processing` 以 URL 为 key（`webants/spider.py:357,387`），同 URL 并发时二次 remove 抛 KeyError | 改用请求对象引用或引用计数 |
 | P2-21 | `avg_request_time` 用 `total_requests` 作分母（`webants/spider.py:390-395`），包含未完成请求 | 用累计耗时 / 已完成请求数 |
 | P2-22 | `request_scheduled` 在 `process_request` 中发送（`webants/spider.py:367`），不是入队时 | 移到 `schedule_request` 成功分支，统计才有意义 |
@@ -586,7 +592,7 @@ await self.request_queue.put((request.priority, request))
 
 ## 8.9 技术债与测试缺口
 
-- **测试覆盖**：`config.py`、`signals.py` 已随 ADR-0004 补基础用例，`spider.py`/`scheduler.py`/`downloader.py` 主路径已有离线覆盖；`persister.py`、`middleware.py`、`utils/` 大多没有测试；`test_url.py` 只有陈旧 `.pyc`，没有源码。
+- **测试覆盖**：`config.py`、`signals.py`、`persister.py`、`middleware.py` 已随 ADR-0004/0005 补齐生命周期、缓存与迁移用例；`spider.py`/`scheduler.py`/`downloader.py` 主路径与可选层接线均有离线覆盖。`utils/` 仍大多没有测试；`test_url.py` 只有陈旧 `.pyc`，没有源码。
 - **双实现**：两套 Signal、两套 CircuitBreaker，维护成本高；建议先统一接口，再合并实现。
 - **无类型检查**：没有 mypy/pyright 配置；大量 `Any` 与 `# type: ignore` 缺失。
 - **文档漂移**：`docs/architecture.md:234` 声称若干历史问题“已修正”，但本次实测仍存在回调契约、Config 合并等问题；`readme.md` 大段内容与代码无关。
@@ -601,8 +607,8 @@ await self.request_queue.put((request.priority, request))
 |----|------|------|
 | SSRF 不做默认限制 | 通用爬虫库不应预设业务白名单 | 在 README 明确安全边界，提供 `hosts_allow` 示例 |
 | 无认证/授权 | 库而非服务 | 由调用方负责 |
-| 两套 Signal / CircuitBreaker 合并 | 破坏性变更，影响面大 | 中期做兼容层，不阻塞 P0/P1 |
-| 可选层默认不启用 | 一次接入会掩盖核心链路问题 | 先文档隔离，再分批接入 |
+| 两套 Signal / CircuitBreaker 合并 | 破坏性变更，影响面大 | 中期做兼容层，不阻塞 P0/P1；异步信号桥接的最小条件见 [待办 BL-001](../backlog.md#bl-001-异步信号桥接) |
+| 可选层默认不启用 | 一次默认启用会改变既有行为 | 已按 ADR-0005 改为显式注入、默认关闭；需要时自行组装 |
 | `priority` 语义重构 | 涉及队列、重试、用户代码 | 与 P0-01 契约重构一起做，避免二次破坏 |
 
 ## 8.11 修订后的路线
@@ -615,12 +621,12 @@ await self.request_queue.put((request.priority, request))
 | 1 | P0-01、P1-03、P1-13、P1-14、P1-19 + `tests/test_spider.py`（已完成 2026-11-04） | 同一问题簇，必须一起改 | MockTransport 端到端：初始页 → 解析 2 个链接 → 抓取子页 → 产出 Result |
 | 2 | P1-01、P1-02、P1-04、P1-18、P1-20、P2-20、P2-23（已完成 2026-11-05） | 生命周期与资源泄漏 | 异常、取消、熔断三种场景下计数恢复；ADR-0002 落地槽位所有权，ADR-0003 落地关闭/取消/收敛契约 |
 | 3 | P1-05、P1-06、P1-07、P1-08、P1-15 ~ P1-17、P2-15 ~ P2-17（已完成 2026-11-05，[ADR-0004](../adr/0004-data-correctness-link-filter-config-cache-signal.md)） | 数据正确性 | 提取器矩阵、Config 合并、缓存统计、信号排序全部通过 |
-| 4 | P1-09、P1-10、P1-11、P2-19 | 可选层接入与关闭语义 | flush 后条数一致；缓存命中语义明确；组装示例可运行 |
+| 4 | P1-09、P1-10、P1-11、P2-19（已完成 2026-11-05，[ADR-0005](../adr/0005-optional-layer-wiring-and-persistence-lifecycle.md)） | 可选层接入与关闭语义 | flush 后条数一致；缓存命中语义明确；组装示例可运行（`example/optional_layers.py`） |
 | 5 | 其余 P2 + CI + 仓库卫生 | 收口 | `ruff`、`isort`、`pytest` 在 CI 全绿 |
 
 ## 8.12 验收清单
 
-- [x] `uv run pytest -q` 无失败，且包含 `tests/test_spider.py`（2026-11-05：155 passed）。
+- [x] `uv run pytest -q` 无失败，且包含 `tests/test_spider.py`（2026-11-05：212 passed）。
 - [ ] 子类以 `async def parse(...): yield ...` 定义时，`start_requests()` 不再触发 `AssertionError`。
 - [ ] 回调三种形态（async generator / 普通协程返回单值 / 抛异常）均有测试覆盖。
 - [ ] 用 mock HTTP 完成一次“初始页 → 解析出 2 个链接 → 抓取子页 → 产出 Result”的端到端测试。
@@ -628,13 +634,13 @@ await self.request_queue.put((request.priority, request))
 - [x] `FilteringLinkExtractor(normalize=False)` 不再抛异常；`normalize=True` 的返回 URL 已归一化。
 - [x] `extract_and_filter_links` 在不传 `hosts_allow`/`extensions_allow` 时返回非空结果。
 - [x] `Config` 加载嵌套 YAML 后，顶层不出现子键，默认值保持不变；环境变量可覆盖嵌套键。
-- [ ] Persister 在进程退出前能 flush 全部缓存；SQLite 行数与 `save` 次数一致。
+- [x] Persister 在进程退出前能 flush 全部缓存；SQLite 行数与 `save` 次数一致（`tests/test_persister.py`）。
 - [ ] `black --check`、`ruff check`、`isort --check` 在 CI 中可稳定运行（版本固定）。
-- [ ] README 与 `docs/architecture.md` 的能力描述与运行路径一致（不再声称未接入的层已生效）。
+- [x] README 与 `docs/architecture.md` 的能力描述与运行路径一致（可选层已显式接入且默认关闭；异步信号标注为实验性）。
 
 ## 8.13 实施状态
 
-> 更新于 2026-11-05。实现依据 [ADR-0001](../adr/0001-callback-contract-and-retry-ownership.md)（Accepted）、[ADR-0002](../adr/0002-schedule-slot-ownership-and-request-lifecycle.md)（Accepted，L1–L4）与 [ADR-0003](../adr/0003-shutdown-cancellation-and-loop-quiescence.md)（Accepted，L5–L8）。
+> 更新于 2026-11-05。实现依据 [ADR-0001](../adr/0001-callback-contract-and-retry-ownership.md)（Accepted）、[ADR-0002](../adr/0002-schedule-slot-ownership-and-request-lifecycle.md)（Accepted）、[ADR-0003](../adr/0003-shutdown-cancellation-and-loop-quiescence.md)（Accepted）、[ADR-0004](../adr/0004-data-correctness-link-filter-config-cache-signal.md)（Accepted）与 [ADR-0005](../adr/0005-optional-layer-wiring-and-persistence-lifecycle.md)（Accepted）。
 
 | 条目 | 状态 | 证据 / 说明 |
 |------|------|-------------|
@@ -659,12 +665,17 @@ await self.request_queue.put((request.priority, request))
 | P1-08 | **Closed** | 接收器 `(priority, seq, handler)`，按 `(-priority, seq)` 排序。`tests/test_signals.py` |
 | P1-15 / P1-16 / P1-17 | **Closed** | 空配置放行；无路径 URL 不再被扩展名检查误杀；`lenient × hosts_allow` 四种组合覆盖。`test_lenient_host_matrix` 等 |
 | P2-15 / P2-16 / P2-17 | **Closed** | `send(None)` 只执行一次；环境变量改为 `__` 分层并做类型守卫；解析树每次返回深拷贝。`tests/test_signals.py`、`tests/test_config.py`、`test_parser_cache_returns_independent_trees` |
-| P1-09 / P1-10 / P1-11 | Open | 按 8.11 第 4 阶段推进 |
-| P2-02 ~ P2-14、P2-18 ~ P2-19、P2-21 | Open | 按 8.11 第 3/5 阶段收口（P2-03 仅模块级 scheme deny 已随 ADR-0004 修正，其余两项仍 Open） |
+| P1-09 | **Closed** | `BasePersister` 增加实例锁、`flush/close`/异步上下文，三个后端成功写批后清空并计 `total_written`；`Spider.close()` 先 flush + close 注入的 persister。`tests/test_persister.py`、`test_results_are_persisted_and_flushed_on_close` |
+| P1-10 | **Closed** | 新增 `Middleware.lookup`；`ResponseCache` 命中只走 lookup，`process_request` 纯透传；Manager 校验请求链返回 `Request \| None`。`tests/test_middleware.py` |
+| P1-11 | **Closed** | `Spider` 显式注入 `config/middleware/persister`，请求流水线接入四阶段，`Result` 分发后持久化，关闭 flush；异步信号按 ADR-0005 标注实验性、未桥接（BL-001）。`tests/test_spider_optional.py`、`tests/test_config.py` |
+| P2-19 | **Closed** | `JsonPersister` 改为 NDJSON 追加写；旧数组在下一次写入时临时文件 + `os.replace` 原子迁移；坏行跳过并计 `load_errors`。`tests/test_persister.py` |
+| P2-02 ~ P2-14、P2-18、P2-21 | Open | 按 8.11 第 3/5 阶段收口（P2-03 仅模块级 scheme deny 已随 ADR-0004 修正，其余两项仍 Open） |
 
 阶段 3（P1-05/06/07/08/15/16/17、P2-15/16/17）的依据是 [ADR-0004](../adr/0004-data-correctness-link-filter-config-cache-signal.md)（Accepted，2026-11-05，含 E1–E15 实测证据），已于 2026-11-05 按 T1–T6 实施完成。
 
-当前测试基线：`uv run pytest -q` → `155 passed`。`tests/test_spider.py`、`tests/test_downloader.py`、`tests/test_request.py`、`tests/test_scheduler.py`、`tests/test_item.py`、`tests/test_extractor.py`、`tests/test_parser.py`、`tests/test_config.py`、`tests/test_signals.py` 全部通过且不访问网络。`isort` 需用 `uv run python -m isort`（CLI 入口报 `Failed to canonicalize script path`）。
+阶段 4（P1-09/10/11、P2-19）的依据是 [ADR-0005](../adr/0005-optional-layer-wiring-and-persistence-lifecycle.md)（Accepted，2026-11-05），已按 T1–T6 实施完成：Persister 生命周期与 NDJSON、中间件 `lookup`、Spider 可选层注入、配置映射、测试与文档/示例同步。异步信号桥接不在阶段 4 范围，见 [待办 BL-001](../backlog.md#bl-001-异步信号桥接)。
+
+当前测试基线：`uv run pytest -q` → `212 passed`。`tests/test_spider.py`、`tests/test_spider_optional.py`、`tests/test_middleware.py`、`tests/test_persister.py`、`tests/test_downloader.py`、`tests/test_request.py`、`tests/test_scheduler.py`、`tests/test_item.py`、`tests/test_extractor.py`、`tests/test_parser.py`、`tests/test_config.py`、`tests/test_signals.py` 全部通过且不访问网络。`isort` 需用 `uv run python -m isort`（CLI 入口报 `Failed to canonicalize script path`）。
 
 ## 附录 A 原版勘误表
 

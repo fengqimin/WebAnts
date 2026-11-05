@@ -92,7 +92,7 @@ flowchart TD
     LOGIN["utils/login.py"] --> PW["playwright（可选）"]
 ```
 
-图中只画了仓库内部模块与第三方包的边；`libs/middleware.py`、`libs/persister.py`、`libs/config.py`、`libs/signals.py` 没有任何来自 `spider.py`/`scheduler.py`/`downloader.py`/`parser.py` 的入边，这是“可选层未接入”的结构性证据。
+图中没有 `Spider → libs` 的**运行期 import 边**：ADR-0005 采用显式注入，`spider.py` 只在 `TYPE_CHECKING` 下引用 `Config`/`Middleware`/`Persister` 类型。Spider 构造时接收实例并调用其接口，默认不创建任何可选层；因此依赖图仍保持无入边，但“未接入”已不再成立，准确说法是“默认关闭、按需注入”。
 
 ## 6.4 导入风格
 
@@ -109,12 +109,12 @@ flowchart TD
 
 | 命令 | 结果 | 说明 |
 |------|------|------|
-| `uv run pytest -q` | **124 passed** | 无失败用例 |
-| `uv run ruff check .` | **Found 17 errors**，全部为 `F401` 未使用导入 | 分布：`example/use_item.py` 7 处、`tests/test_item.py` 1 处、`webants/libs/config.py` 1 处、`middleware.py` 2 处、`signals.py` 3 处、`statistic.py` 3 处 |
-| `uv run isort --check .` | **无法运行**（`Failed to canonicalize script path`） | 改用 `uv run python -m isort --check-only .`：17 个文件不合格、2 个跳过 |
+| `uv run pytest -q` | **212 passed** | 无失败用例（ADR-0005 T1–T5 后） |
+| `uv run ruff check .` | **Found 10 errors**，全部为 `F401` 未使用导入 | 分布：`example/use_item.py` 7 处、`webants/utils/statistic.py` 3 处；其余历史 F401 已随 ADR-0004/0005 清理 |
+| `uv run isort --check .` | **无法运行**（`Failed to canonicalize script path`） | 改用 `uv run python -m isort --check-only .`：10 个文件不合格、2 个跳过 |
 | `uv run black --check .` | 无法运行 | `Failed to canonicalize script path`，black 未安装/未声明 |
 
-`ruff` 的 17 个错误都是可自动修复的 `F401`，不影响运行，但说明仓库未在提交前执行 lint。
+`ruff` 的 10 个错误都是可自动修复的 `F401`，不影响运行，属于 8.11 阶段 5 的清理项（P2-05）。
 
 ## 6.6 耦合热点
 
@@ -126,6 +126,9 @@ flowchart TD
 | `Config` 嵌套合并 | `deepcopy` 默认值 + 递归深合并 + `__` 环境变量 | 嵌套键不再拍平，默认值不被实例污染（P1-06、P2-16 Closed，ADR-0004） |
 | `ExtractorFactory` 元类注册表 | 类字典全局可变，按前缀匹配 | 新增/重名提取器行为隐式 |
 | `utils/statistic.py` | 顶层 `import psutil` | 未安装即无法 import 整个模块（P2-06） |
-| `SignalManager` | 全局单例 + 同步/异步两套 | 事件语义仍分裂；异步版改为高优先级先执行、同优先级按注册顺序（P1-08、P2-15 Closed，ADR-0004） |
+| `SignalManager` | 全局单例 + 同步/异步两套 | 事件语义仍分裂；异步版改为高优先级先执行、同优先级按注册顺序（P1-08、P2-15 Closed，ADR-0004）；生命周期未桥接（BL-001） |
+| 中间件 `lookup` | 缓存命中走独立阶段，请求链只接受 `Request` | 避免 `Response` 污染请求链（P1-10 Closed，ADR-0005） |
+| Persister 生命周期 | `flush/close` + 实例锁；JSON 为 NDJSON 追加 | 关闭前落盘；旧数组自动迁移（P1-09、P2-19 Closed，ADR-0005） |
+| Config → Spider | 显式注入、构造参数优先 | YAML/环境变量真正影响组件（P1-11 Closed，ADR-0005） |
 
 外部系统依赖只有两类：目标 HTTP 站点（`Downloader`）与可选的 Playwright 浏览器二进制（`utils/login.py`）。没有数据库服务、缓存服务或消息中间件。

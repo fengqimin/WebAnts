@@ -22,6 +22,30 @@ graph TD
 4. Parser processes data to generate new requests -> Scheduler
 5. Parser processes data to generate results -> Spider
 
+## Optional layers
+
+`Spider()` keeps the legacy default behavior. Config, middleware and persistence are opt-in and injected explicitly:
+
+```python
+from pathlib import Path
+
+from webants.libs.config import Config
+from webants.libs.middleware import MiddlewareManager, ResponseCache
+from webants.libs.persister import JsonPersister, PersisterManager
+from webants.spider import Spider
+
+config = Config()
+middleware = MiddlewareManager()
+middleware.add_middleware(ResponseCache(ttl=60))
+persister = PersisterManager(Path("data"))
+persister.add_persister("json", JsonPersister(Path("data/results.json")))
+
+spider = MySpider(config=config, middleware=middleware, persister=persister)
+await spider.start()  # close() flushes and closes the injected persister
+```
+
+A runnable offline assembly is available in `example/optional_layers.py`. The async `signal_manager` is experimental and is not bridged to the Spider lifecycle yet.
+
 Based on the request "#codebase 审计代码，解释代码含义并进行优化" (which translates to "code audit, explain code meaning and optimize"), I'll help gather the relevant code context from the entire codebase for a comprehensive code review.
 
 Let me search through the codebase to find the core components and their relationships: I understand the user wants to perform a code audit, understand the code meaning, and look for optimization opportunities. The codebase appears to be a web crawler framework called WebAnts. Let me gather the core components systematically to understand their relationships and functionality.

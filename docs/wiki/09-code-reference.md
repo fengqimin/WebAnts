@@ -17,19 +17,24 @@
 | `Spider.__init__` | method | `:143` | 组装组件、统计、信号、关闭状态 | 外部 |
 | `Spider._setup_signals` | method | `:235` | 连接五个默认 handler | `__init__` |
 | `Spider.start_requests` | async gen | `:287` | 由 `start_urls` 生成 `Request` | `Spider.start` |
-| `Spider.parse` | async method | `:302` | 默认 `raise NotImplementedError`；子类可用 async generator 覆盖 | 子类覆盖 |
-| `Spider.handle_error` | async method | `:316` | 默认 errback：只记录日志，不计数/不改熔断 | `Request.errback` |
-| `Spider._invoke_callback` | async method | `:333` | 调用回调一次并归一化 async generator/coroutine | `process_request` |
-| `Spider._consume_callback_value` | async method | `:364` | 归一化协程返回值（None/单项/可迭代/异步可迭代） | `_invoke_callback` |
-| `Spider._schedule` | async method | `:391` | 入队并返回 `ScheduleResult`；已关闭时返回 `None` | `start`、`_dispatch_item` |
-| `Spider._dispatch_item` | async method | `:418` | Request → `_schedule`，Result → item_scraped | `_invoke_callback` |
-| `Spider.process_request` | async method | `:430` | 单请求完整处理（下载、回调、分发、`slot.release()`） | `Spider.start` 的 task、外部 |
-| `Spider._on_task_done` | method | `:503` | 清登记、刷新活动时钟、计取消/逃逸异常 | `Task.add_done_callback` |
-| `Spider.start` | async method | `:524` | 生命周期主循环；关闭后抛 `RuntimeError` | 外部 |
-| `Spider.close` | async method | `:584` | 幂等关闭：取消在飞、排空队列、关 client、发信号一次 | 外部、`start` 的 finally、`__aexit__` |
-| `Spider.__aenter__` | async method | `:635` | 返回 `self`，不自动 start | `async with` |
-| `Spider.__aexit__` | async method | `:639` | 调用一次 `close()` | `async with` |
-| `Spider.get_stats` | method | `:643` | 聚合四组统计，含 `closed`/`inflight_count` | 外部 |
+| `Spider._coerce_log_level` | static method | `:341` | 字符串/整数日志级别转换，非法值回退 INFO | `__init__` |
+| `Spider.parse` | async method | `:423` | 默认 `raise NotImplementedError`；子类可用 async generator 覆盖 | 子类覆盖 |
+| `Spider.handle_error` | async method | `:437` | 默认 errback：只记录日志，不计数/不改熔断 | `Request.errback` |
+| `Spider._invoke_callback` | async method | `:454` | 调用回调一次并归一化 async generator/coroutine | `process_request` |
+| `Spider._consume_callback_value` | async method | `:485` | 归一化协程返回值（None/单项/可迭代/异步可迭代） | `_invoke_callback` |
+| `Spider._schedule` | async method | `:512` | 入队并返回 `ScheduleResult`；已关闭时返回 `None` | `start`、`_dispatch_item` |
+| `Spider._dispatch_item` | async method | `:539` | Request → `_schedule`，Result → item_scraped + `_persist_item` | `_invoke_callback` |
+| `Spider._persist_item` | async method | `:552` | 将 Result 交给 persister；失败只计 `persist_failures` | `_dispatch_item` |
+| `Spider._prepare_response` | async method | `:571` | 执行 lookup/process_request/下载/process_response；过滤时返回 None | `process_request` |
+| `Spider._apply_middleware_exception` | async method | `:612` | 询问 process_exception，返回 none/retry/response 并限制重试 | `process_request` |
+| `Spider.process_request` | async method | `:657` | 单请求完整处理（中间件、下载、回调、持久化、`slot.release()`） | `Spider.start` 的 task、外部 |
+| `Spider._on_task_done` | method | `:768` | 清登记、刷新活动时钟、计取消/逃逸异常 | `Task.add_done_callback` |
+| `Spider.start` | async method | `:804` | 生命周期主循环；关闭后抛 `RuntimeError` | 外部 |
+| `Spider.close` | async method | `:864` | 幂等关闭：取消在飞、排空队列、persister close、关 client、发信号一次 | 外部、`start` 的 finally、`__aexit__` |
+| `Spider._close_persister` | async method | `:789` | flush + close 注入的 persister；失败只记录 | `Spider.close` |
+| `Spider.__aenter__` | async method | `:918` | 返回 `self`，不自动 start | `async with` |
+| `Spider.__aexit__` | async method | `:922` | 调用一次 `close()` | `async with` |
+| `Spider.get_stats` | method | `:926` | 聚合四组统计与可选层统计，含 `closed`/`inflight_count` | 外部 |
 
 ## 9.2 `webants/scheduler.py`
 
@@ -169,22 +174,25 @@
 
 | 符号 | 类型 | 位置 | 用途 | 调用方 |
 |------|------|------|------|--------|
-| `Middleware` | ABC | `webants/libs/middleware.py:29` | 三阶段接口 | 四个实现 |
-| `CircuitBreaker` | class | `:87` | 中间件版熔断 | 无内部调用 |
-| `RateLimiter` | class | `:181` | 域名限速 | 无内部调用 |
-| `RequestDeduplicator` | class | `:306` | 请求去重 | 无内部调用 |
-| `ResponseCache` | class | `:365` | 响应缓存 | 无内部调用 |
-| `MiddlewareManager` | class | `:454` | 中间件链 | 无内部调用 |
+| `Middleware` | ABC | `webants/libs/middleware.py:29` | 四阶段接口：`lookup` + `process_request/response/exception` | 四个实现 |
+| `Middleware.lookup` | async method | `:31` | 返回缓存响应或 None；默认实现返回 None | `MiddlewareManager.lookup` |
+| `CircuitBreaker` | class | `:91` | 中间件版熔断 | 可选中间件 |
+| `RateLimiter` | class | `:185` | 域名限速 | 可选中间件 |
+| `RequestDeduplicator` | class | `:310` | 请求去重 | 可选中间件 |
+| `ResponseCache` | class | `:369` | 响应缓存；命中走 `lookup`，TTL 滑动 | `Spider` 经 Manager |
+| `MiddlewareManager` | class | `:474` | 中间件链；新增 `lookup`/`get_stats` 与请求类型守卫 | `Spider(middleware=...)` |
 
 ## 9.10 `webants/libs/persister.py`
 
 | 符号 | 类型 | 位置 | 用途 | 调用方 |
 |------|------|------|------|--------|
-| `BasePersister` | ABC | `webants/libs/persister.py:22` | 存储接口 + 统计 | 三个后端 |
-| `JsonPersister` | class | `:94` | JSON 数组存储 | 无内部调用 |
-| `CsvPersister` | class | `:205` | CSV 存储 | 无内部调用 |
-| `SqlitePersister` | class | `:324` | SQLite 存储 | 无内部调用 |
-| `PersisterManager` | class | `:476` | 多后端管理与同步 | 无内部调用 |
+| `BasePersister` | ABC | `webants/libs/persister.py:26` | 存储接口 + 锁 + `flush/close` + 统计 | 三个后端 |
+| `BasePersister.flush` | async method | `:110` | 强制写出当前批次，返回条数 | `PersisterManager.flush`、`close` |
+| `BasePersister.close` | async method | `:125` | 幂等 flush + 标记关闭；关闭后写入抛 `PersistenceError` | `Spider._close_persister` |
+| `JsonPersister` | class | `:171` | NDJSON 追加存储；旧数组可读并在下次写入原子迁移 | `PersisterManager` |
+| `CsvPersister` | class | `:411` | CSV 存储 | `PersisterManager` |
+| `SqlitePersister` | class | `:535` | SQLite 存储 | `PersisterManager` |
+| `PersisterManager` | class | `:692` | 多后端管理、`flush/close` 与同步 | `Spider(persister=...)` |
 
 ## 9.11 `webants/libs/signals.py`
 

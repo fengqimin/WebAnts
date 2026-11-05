@@ -19,6 +19,7 @@
 | [ADR-0002](0002-schedule-slot-ownership-and-request-lifecycle.md) | 调度槽位所有权与请求生命周期 | Accepted | 2026-11-04 | P1-01、P1-02、P1-04、P1-18、P1-20、P2-20、P2-23 |
 | [ADR-0003](0003-shutdown-cancellation-and-loop-quiescence.md) | 关闭、取消与主循环收敛 | Accepted | 2026-11-04 | P1-02、P1-20、P2-23 |
 | [ADR-0004](0004-data-correctness-link-filter-config-cache-signal.md) | 数据正确性契约：链接过滤、配置合并、解析缓存与信号顺序 | Accepted | 2026-11-05 | P1-05、P1-06、P1-07、P1-08、P1-15、P1-16、P1-17、P2-15、P2-16、P2-17 |
+| [ADR-0005](0005-optional-layer-wiring-and-persistence-lifecycle.md) | 可选层接入与关闭语义：中间件缓存命中、配置注入、持久化 flush/close 与 JSON 原子追加 | Accepted | 2026-11-05 | P1-09、P1-10、P1-11、P2-19 |
 
 ## 新增约定
 

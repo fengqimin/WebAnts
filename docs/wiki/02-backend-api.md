@@ -18,28 +18,32 @@ stateDiagram-v2
 
 | 阶段 | 方法 | 行为 | 证据 |
 |------|------|------|------|
-| 构造 | `Spider.__init__(**kwargs)` | 实例化 Scheduler/Downloader/Parser，初始化统计、熔断表、同步 Signal、关闭状态与 `_close_lock` | `webants/spider.py:143-233` |
-| 启动 | `await Spider.start()` | 生成初始请求并入队，进入轮询主循环；关闭后调用抛 `RuntimeError` | `webants/spider.py:524-582` |
-| 处理 | `await Spider.process_request(request, slot=...)` | 熔断检查、下载、`_invoke_callback` 归一化并分发、发信号、`finally` 中 `slot.release()` 并清登记 | `webants/spider.py:430-501` |
-| 关闭 | `await Spider.close()` | 幂等、与 `_running` 解耦：取消在飞 → 排空队列 → 关 downloader → 发 `spider_stopped`（恰好一次）→ 置 `_closed` | `webants/spider.py:584-633` |
-| 上下文 | `async with Spider(...) as spider:` | `__aenter__` 不自动 start；`__aexit__` 调用一次 `close()` | `webants/spider.py:635-641` |
-| 观测 | `Spider.get_stats()` | 合并 spider/scheduler/parser/downloader 统计，含 `closed`、`inflight_count` | `webants/spider.py:643-652` |
+| 构造 | `Spider.__init__(**kwargs)` | 解析 Config 映射，实例化 Scheduler/Downloader/Parser，保存可选层注入，初始化统计、熔断表、同步 Signal、关闭状态与 `_close_lock` | `webants/spider.py:161-340` |
+| 启动 | `await Spider.start()` | 生成初始请求并入队，进入轮询主循环；关闭后调用抛 `RuntimeError` | `webants/spider.py:849-882` |
+| 处理 | `await Spider.process_request(request, slot=...)` | 熔断检查、可选中间件四阶段、下载、`_invoke_callback` 归一化并分发、持久化、发信号、`finally` 中 `slot.release()` 并清登记 | `webants/spider.py:657-820` |
+| 关闭 | `await Spider.close()` | 幂等、与 `_running` 解耦：取消在飞 → 排空队列 → persister flush/close → 关 downloader → 发 `spider_stopped`（恰好一次）→ 置 `_closed` | `webants/spider.py:864-924` |
+| 上下文 | `async with Spider(...) as spider:` | `__aenter__` 不自动 start；`__aexit__` 调用一次 `close()` | `webants/spider.py:931-936` |
+| 观测 | `Spider.get_stats()` | 合并 spider/scheduler/parser/downloader 统计；注入可选层时附加 `middleware_stats`/`persister_stats` | `webants/spider.py:926-950` |
 
-构造参数：
+构造参数（默认值为 `None` 时取 Config 或内置默认；显式参数优先）：
 
 | 参数 | 默认 | 作用 | 落点 |
 |------|------|------|------|
-| `concurrent_requests` | `10` | 同时传给 scheduler 的域名并发与 downloader 的并发 | `webants/spider.py:146,174-181` |
-| `request_timeout` | `30` | 下载超时（秒） | `webants/spider.py:147,177-180` |
-| `retry_times` | `3` | 写入 `Request.retries` | `webants/spider.py:148,298` |
-| `retry_delay` | `1.0` | 只写入 `self.settings`，未传给 Downloader | `webants/spider.py:149,185-192` |
-| `log_level` | `logging.INFO` | 各组件日志级别 | `webants/spider.py:150,171-182` |
-| `failure_threshold` | `5` | 熔断阈值 | `webants/spider.py:151,228` |
-| `recovery_timeout` | `60.0` | 熔断恢复时间 | `webants/spider.py:152,229` |
-| `idle_grace` | `0.5` | 主循环在“队列空 + 无在飞任务”后继续等待的静默窗口（秒）；`0` 表示立即退出，供测试使用 | `webants/spider.py:153,202` |
-| `**kwargs` | — | 原样并入 `self.settings` | `webants/spider.py:185-192` |
+| `concurrent_requests` | `None` → `10` | 同时传给 scheduler 的域名并发与 downloader 的并发；显式传入时两者都使用该值 | `webants/spider.py:161-230` |
+| `request_timeout` | `None` → `30` | 下载超时（秒） | `webants/spider.py:232-236` |
+| `retry_times` | `None` → `3` | 写入 `Request.retries` | `webants/spider.py:237-241,408-430` |
+| `retry_delay` | `None` → `1.0` | 写入 `self.settings` 并传给 Downloader | `webants/spider.py:242-246,300-305` |
+| `log_level` | `None` → `INFO` | 各组件日志级别（支持字符串） | `webants/spider.py:263-268,341-354` |
+| `failure_threshold` | `None` → `5` | 熔断阈值 | `webants/spider.py:247-251` |
+| `recovery_timeout` | `None` → `60.0` | 熔断恢复时间 | `webants/spider.py:252-256` |
+| `idle_grace` | `0.5` | 主循环在“队列空 + 无在飞任务”后继续等待的静默窗口（秒）；`0` 表示立即退出，供测试使用 | `webants/spider.py:172,386` |
+| `middleware_max_retries` | `3` | `process_exception` 返回新 `Request` 时的最大重试次数 | `webants/spider.py:173,612-655` |
+| `config` | `None` | 显式注入的 `Config`；只在参数未显式传入时生效 | `webants/spider.py:175-226` |
+| `middleware` | `None` | 可选 `MiddlewareManager`；提供 `lookup`/`process_*` 四阶段 | `webants/spider.py:176,571-610` |
+| `persister` | `None` | 可选 `PersisterManager`；所有权移交 Spider，关闭时 flush | `webants/spider.py:177,552-568` |
+| `**kwargs` | — | 原样并入 `self.settings` | `webants/spider.py:308-317` |
 
-> `retry_delay` 没有传给 `Downloader`（后者自己从 `kwargs.get("retry_delay", 1)` 取值），二者默认值相同但修改 `Spider(retry_delay=...)` 不会影响下载器重试间隔。
+> 不传 `config` 时有效默认值与旧版一致；传入 `Config` 后按 `downloader.*`/`scheduler.*`/`parser.*`/`spider.*`/`logging.level` 映射（ADR-0005 §2.2）。`retry_delay` 现在会传给 Downloader。
 
 ## 2.2 Spider 扩展点
 
@@ -138,11 +142,11 @@ stateDiagram-v2
 
 | 组件 | 主要方法 | 是否接入主链路 |
 |------|----------|----------------|
-| `MiddlewareManager` | `add_middleware`、`process_request`、`process_response`、`process_exception` | 否（`webants/libs/middleware.py:454-572`） |
-| `JsonPersister`/`CsvPersister`/`SqlitePersister` | `save`、`load`、`update_stats` | 否（`webants/libs/persister.py:94-605`） |
-| `PersisterManager` | `add_persister`、`save`、`load`、`sync`、`get_stats` | 否（`webants/libs/persister.py:476-605`） |
-| `SignalManager` | `register`、`connect`、`disconnect`、`send` | 否（`webants/libs/signals.py:167-279`；排序语义见 ADR-0004） |
-| `Config` | `get`、`set`、`as_dict`、`save`、`load_config` | 否（`webants/libs/config.py:78-338`；嵌套合并与环境变量见 ADR-0004） |
+| `MiddlewareManager` | `add_middleware`、`lookup`、`process_request`、`process_response`、`process_exception`、`get_stats` | 可选：`Spider(middleware=...)`（`webants/libs/middleware.py:474-570`） |
+| `JsonPersister`/`CsvPersister`/`SqlitePersister` | `save`、`load`、`flush`、`close`、`update_stats` | 可选：经 `PersisterManager` 注入（`webants/libs/persister.py:26-690`） |
+| `PersisterManager` | `add_persister`、`save`、`load`、`flush`、`close`、`sync`、`get_stats` | 可选：`Spider(persister=...)`（`webants/libs/persister.py:692-820`） |
+| `SignalManager` | `register`、`connect`、`disconnect`、`send` | 实验性、未桥接 Spider 生命周期（`webants/libs/signals.py:167-279`；排序语义见 ADR-0004；桥接待办 BL-001） |
+| `Config` | `get`、`set`、`as_dict`、`save`、`load_config` | 可选：`Spider(config=...)`（`webants/libs/config.py:78-338`；映射见 ADR-0005） |
 
 ## 2.10 错误处理
 

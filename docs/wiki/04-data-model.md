@@ -102,17 +102,17 @@ CREATE TABLE IF NOT EXISTS results (
 
 - 插入是逐行 `INSERT`，没有 `INSERT OR REPLACE`、没有唯一约束（`webants/libs/persister.py:450-465`）。
 - 去重只发生在调度器内存中的 `seen_urls`（`webants/scheduler.py:95,153`），**不落库**；进程重启后重复 URL 会再次抓取、再次插入。
-- 批量写入阈值 `batch_size=100`（`webants/libs/persister.py:332`），达到阈值才 `_write_batch`（`:389-390`）。
+- 批量写入阈值 `batch_size=100`（`webants/libs/persister.py:419`）；达到阈值自动写批，未满批次由 `flush()` / `close()` 强制写出（`:110-135`）。
 
 ## 4.3 其他落盘形态
 
 | 后端 | 文件形态 | 关键行为 | 证据 |
 |------|----------|----------|------|
-| `JsonPersister` | 一个 JSON 数组 | 每次写批先读全文件、追加、再整体覆盖；`indent`/`ensure_ascii` 可配 | `webants/libs/persister.py:94-202` |
+| `JsonPersister` | NDJSON（每行一条紧凑 JSON） | 正常路径 `a` 追加，不再读全文件；旧 JSON 数组可读，并在下一次写入时用临时文件 + `os.replace` 原子迁移；`indent` 保留但忽略 | `webants/libs/persister.py:171-410` |
 | `CsvPersister` | CSV，首行表头 | 首次写 `w` 并写表头，之后 `a` 追加；所有值 `str(v)` | `webants/libs/persister.py:205-321` |
 | `SqlitePersister` | `.db` 文件 | 固定七列；`data` 存 fields JSON | `webants/libs/persister.py:324-473` |
 
-`JsonPersister.load` 用的是标准库 `json.load`（`webants/libs/persister.py:163-164`），而同仓库 `utils/misc.py` 优先使用 `ujson`（`webants/utils/misc.py:5-8`），两处序列化实现不一致。
+`JsonPersister` 使用标准库 `json`：旧数组用 `json.load`，NDJSON 逐行 `json.loads`（`webants/libs/persister.py:247-306`）；同仓库 `utils/misc.py` 优先使用 `ujson`（`webants/utils/misc.py:5-8`），两处序列化实现仍不一致（P2-08 Open）。
 
 `CsvPersister` 把 `Result` 转成 `{字段名: str(value)}`（`webants/libs/persister.py:242-246`）；如果不同批次的字段集合不同，追加行会出现缺列/多列，`csv.DictWriter` 不会校验（`:303-315`）。
 
