@@ -7,14 +7,18 @@ This module provides storage backends for saving crawled data with:
 - Validation and error handling
 """
 
+import asyncio
 import csv
 import json
+import os
 import sqlite3
+import tempfile
 import time
 from abc import ABC, abstractmethod
 from pathlib import Path
-from typing import Dict, List, Optional, Union
+from typing import Any, Dict, List, Optional, Union
 
+from webants.libs.exceptions import PersistenceError
 from webants.libs.result import Result
 from webants.utils.logger import get_logger
 
@@ -32,6 +36,10 @@ class BasePersister(ABC):
         self.path = Path(path)
         self.logger = get_logger(self.__class__.__name__)
 
+        # Lifecycle: writes are serialized per instance and rejected after close.
+        self._lock = asyncio.Lock()
+        self._closed = False
+
         # Statistics
         self.stats = {
             "total_saved": 0,
@@ -41,6 +49,8 @@ class BasePersister(ABC):
             "last_save": None,
             "last_load": None,
             "storage_size": 0,
+            "total_written": 0,
+            "flush_count": 0,
         }
 
     @abstractmethod
@@ -67,6 +77,73 @@ class BasePersister(ABC):
         """
         pass
 
+    @abstractmethod
+    async def _write_batch(self) -> int:
+        """Flush the in-memory batch to storage.
+
+        Callers must hold ``self._lock``. Implementations must keep the batch
+        intact when writing fails and return the number of written items.
+        """
+        pass
+
+    @property
+    def closed(self) -> bool:
+        """Whether the persister has been closed."""
+        return self._closed
+
+    def _ensure_open(self) -> None:
+        """Reject writes after ``close()`` instead of losing them silently."""
+        if self._closed:
+            raise PersistenceError(
+                f"{self.__class__.__name__} is closed",
+                code="PERSISTER_CLOSED",
+            )
+
+    def _record_written(self, count: int) -> None:
+        """Update write statistics after a successful batch write."""
+        if count <= 0:
+            return
+        self.stats["total_written"] += count
+        if self.path.exists():
+            self.stats["storage_size"] = self.path.stat().st_size
+
+    async def flush(self) -> int:
+        """Write the pending batch regardless of ``batch_size``.
+
+        Returns:
+            int: Number of items written. Returns 0 when the batch is empty or
+            the persister is already closed.
+        """
+        async with self._lock:
+            if self._closed:
+                return 0
+            written = await self._write_batch()
+            if written:
+                self.stats["flush_count"] += 1
+            return written
+
+    async def close(self) -> None:
+        """Flush the pending batch and mark the persister as closed.
+
+        Idempotent. If flushing fails the exception propagates and the
+        persister stays open, so the caller can retry without losing the batch.
+        """
+        if self._closed:
+            return
+        async with self._lock:
+            if self._closed:
+                return
+            await self._write_batch()
+            self._closed = True
+
+    async def __aenter__(self) -> "BasePersister":
+        """Enter the asynchronous context without opening any resource."""
+        return self
+
+    async def __aexit__(self, exc_type, exc, tb) -> None:
+        """Close the persister on context exit."""
+        await self.close()
+
     def update_stats(self, operation: str, success: bool = True) -> None:
         """Update persister statistics.
 
@@ -92,7 +169,14 @@ class BasePersister(ABC):
 
 
 class JsonPersister(BasePersister):
-    """JSON file storage backend."""
+    """NDJSON storage backend (one JSON value per line).
+
+    Legacy files containing a single JSON array are still readable and are
+    converted atomically to NDJSON on the next write.
+
+    A given path must have a single writer. ``asyncio.Lock`` only serializes
+    operations on this instance; it does not coordinate other processes.
+    """
 
     def __init__(
         self,
@@ -107,7 +191,8 @@ class JsonPersister(BasePersister):
 
         Args:
             path: JSON file path
-            indent: JSON indentation
+            indent: Retained for signature compatibility; NDJSON output is
+                always compact and this value is ignored.
             ensure_ascii: Whether to escape non-ASCII characters
             batch_size: Number of items to write at once
             **kwargs: Additional configuration
@@ -117,6 +202,8 @@ class JsonPersister(BasePersister):
         self.ensure_ascii = ensure_ascii
         self.batch_size = batch_size
         self._batch = []
+        # None = not inspected yet; True = legacy JSON array; False = NDJSON.
+        self._legacy_format: Optional[bool] = None
 
     async def save(self, data: Union[Result, Dict, List]) -> bool:
         """Save data to JSON file.
@@ -127,28 +214,33 @@ class JsonPersister(BasePersister):
         Returns:
             True if successful
         """
-        try:
-            if isinstance(data, Result):
-                data = data.to_dict()
+        async with self._lock:
+            self._ensure_open()
+            try:
+                if isinstance(data, Result):
+                    data = data.to_dict()
 
-            if isinstance(data, list):
-                self._batch.extend(data)
-            else:
-                self._batch.append(data)
+                if isinstance(data, list):
+                    self._batch.extend(data)
+                else:
+                    self._batch.append(data)
 
-            if len(self._batch) >= self.batch_size:
-                await self._write_batch()
+                if len(self._batch) >= self.batch_size:
+                    await self._write_batch()
 
-            self.update_stats("save")
-            return True
+                self.update_stats("save")
+                return True
 
-        except Exception as e:
-            self.logger.error(f"Error saving to JSON: {str(e)}")
-            self.update_stats("save", success=False)
-            return False
+            except Exception as e:
+                self.logger.error(f"Error saving to JSON: {str(e)}")
+                self.update_stats("save", success=False)
+                return False
 
     async def load(self, query: Optional[Dict] = None) -> List[Dict]:
-        """Load data from JSON file.
+        """Load data from an NDJSON file, or a legacy JSON array.
+
+        Malformed NDJSON lines are counted in ``load_errors`` and skipped so a
+        partially written trailing line cannot hide the records before it.
 
         Args:
             query: Optional filter query
@@ -161,15 +253,14 @@ class JsonPersister(BasePersister):
                 return []
 
             with open(self.path, "r", encoding="utf-8") as f:
-                data = json.load(f)
+                head = f.read(4096)
+                f.seek(0)
+                if self._looks_like_array(head):
+                    data = self._read_legacy_array(f)
+                else:
+                    data = self._read_ndjson(f)
 
-            if query:
-                data = [
-                    item
-                    for item in data
-                    if all(item.get(k) == v for k, v in query.items())
-                ]
-
+            data = self._filter(data, query)
             self.update_stats("load")
             return data
 
@@ -178,24 +269,139 @@ class JsonPersister(BasePersister):
             self.update_stats("load", success=False)
             return []
 
-    async def _write_batch(self) -> None:
-        """Write batched data to file."""
+    def _read_legacy_array(self, file) -> List:
+        """Parse a legacy single-array JSON file."""
+        text = file.read()
+        if not text.strip():
+            return []
+        try:
+            data = json.loads(text)
+        except json.JSONDecodeError as e:
+            self.stats["load_errors"] += 1
+            self.logger.warning(f"Skipping malformed legacy JSON array: {e}")
+            return []
+        if not isinstance(data, list):
+            self.stats["load_errors"] += 1
+            self.logger.warning("Legacy JSON file does not contain an array")
+            return []
+        return data
+
+    def _read_ndjson(self, file) -> List:
+        """Parse line-delimited JSON, skipping malformed lines."""
+        data = []
+        for lineno, line in enumerate(file, 1):
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                data.append(json.loads(line))
+            except json.JSONDecodeError as e:
+                self.stats["load_errors"] += 1
+                self.logger.warning(
+                    f"Skipping malformed NDJSON line {lineno} in {self.path}: {e}"
+                )
+        return data
+
+    @staticmethod
+    def _filter(data: List, query: Optional[Dict]) -> List:
+        """Apply an equality query to loaded records."""
+        if not query:
+            return data
+        return [
+            item
+            for item in data
+            if isinstance(item, dict)
+            and all(item.get(k) == v for k, v in query.items())
+        ]
+
+    @staticmethod
+    def _looks_like_array(text: str) -> bool:
+        """Whether text starts with a legacy JSON array."""
+        return text.lstrip("\ufeff \t\r\n").startswith("[")
+
+    def _serialize(self, item: Any) -> str:
+        """Serialize one NDJSON line."""
+        return json.dumps(
+            item,
+            ensure_ascii=self.ensure_ascii,
+            separators=(",", ":"),
+        )
+
+    def _is_legacy_array(self) -> bool:
+        """Inspect the target file once and cache its format."""
+        if self._legacy_format is not None:
+            return self._legacy_format
+        if not self.path.exists() or self.path.stat().st_size == 0:
+            self._legacy_format = False
+            return False
+
+        with open(self.path, "r", encoding="utf-8") as f:
+            head = f.read(4096)
+        self._legacy_format = self._looks_like_array(head)
+        return self._legacy_format
+
+    def _append(self, items: List) -> None:
+        """Append items as NDJSON without reading the existing file."""
+        payload = "".join(f"{self._serialize(item)}\n" for item in items)
+        # A partially written trailing line must not swallow the next record.
+        separator = "" if not self.path.exists() or self._ends_with_newline() else "\n"
+        with open(self.path, "a", encoding="utf-8", newline="\n") as f:
+            f.write(separator)
+            f.write(payload)
+            f.flush()
+
+    def _ends_with_newline(self) -> bool:
+        """Check the last byte of the target file."""
+        try:
+            with open(self.path, "rb") as f:
+                f.seek(0, os.SEEK_END)
+                if f.tell() == 0:
+                    return True
+                f.seek(-1, os.SEEK_END)
+                return f.read(1) == b"\n"
+        except OSError:
+            return True
+
+    def _migrate_and_write(self, items: List) -> None:
+        """Convert a legacy array to NDJSON and append the new items atomically."""
+        with open(self.path, "r", encoding="utf-8") as f:
+            legacy = json.load(f)
+        if not isinstance(legacy, list):
+            raise ValueError(f"Legacy JSON file is not an array: {self.path}")
+
+        records = legacy + items
+        fd, tmp_name = tempfile.mkstemp(
+            dir=str(self.path.parent),
+            prefix=f"{self.path.name}.",
+            suffix=".tmp",
+        )
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8", newline="\n") as f:
+                f.write("".join(f"{self._serialize(item)}\n" for item in records))
+            os.replace(tmp_name, self.path)
+        except BaseException:
+            try:
+                os.unlink(tmp_name)
+            except OSError:
+                pass
+            raise
+
+    async def _write_batch(self) -> int:
+        """Write batched data to file and return the number of items written."""
         if not self._batch:
-            return
+            return 0
 
         try:
-            if self.path.exists():
-                with open(self.path, "r", encoding="utf-8") as f:
-                    data = json.load(f)
+            written = len(self._batch)
+            if self._is_legacy_array():
+                self._migrate_and_write(list(self._batch))
+                self._legacy_format = False
             else:
-                data = []
-
-            data.extend(self._batch)
-
-            with open(self.path, "w", encoding="utf-8") as f:
-                json.dump(data, f, indent=self.indent, ensure_ascii=self.ensure_ascii)
+                self._append(self._batch)
 
             self._batch = []
+            self._record_written(written)
+            return written
 
         except Exception as e:
             self.logger.error(f"Error writing batch to JSON: {str(e)}")
@@ -238,28 +444,30 @@ class CsvPersister(BasePersister):
         Returns:
             True if successful
         """
-        try:
-            if isinstance(data, Result):
-                data = {
-                    k: str(v.value) if hasattr(v, "value") else str(v)
-                    for k, v in data.fields.items()
-                }
+        async with self._lock:
+            self._ensure_open()
+            try:
+                if isinstance(data, Result):
+                    data = {
+                        k: str(v.value) if hasattr(v, "value") else str(v)
+                        for k, v in data.fields.items()
+                    }
 
-            if isinstance(data, list):
-                self._batch.extend(data)
-            else:
-                self._batch.append(data)
+                if isinstance(data, list):
+                    self._batch.extend(data)
+                else:
+                    self._batch.append(data)
 
-            if len(self._batch) >= self.batch_size:
-                await self._write_batch()
+                if len(self._batch) >= self.batch_size:
+                    await self._write_batch()
 
-            self.update_stats("save")
-            return True
+                self.update_stats("save")
+                return True
 
-        except Exception as e:
-            self.logger.error(f"Error saving to CSV: {str(e)}")
-            self.update_stats("save", success=False)
-            return False
+            except Exception as e:
+                self.logger.error(f"Error saving to CSV: {str(e)}")
+                self.update_stats("save", success=False)
+                return False
 
     async def load(self, query: Optional[Dict] = None) -> List[Dict]:
         """Load data from CSV file.
@@ -293,14 +501,15 @@ class CsvPersister(BasePersister):
             self.update_stats("load", success=False)
             return []
 
-    async def _write_batch(self) -> None:
-        """Write batched rows to file."""
+    async def _write_batch(self) -> int:
+        """Write batched rows to file and return the number of rows written."""
         if not self._batch:
-            return
+            return 0
 
         try:
             mode = "a" if self.path.exists() else "w"
             fieldnames = self.fieldnames or list(self._batch[0].keys())
+            written = len(self._batch)
 
             with open(self.path, mode, newline="", encoding="utf-8") as f:
                 writer = csv.DictWriter(
@@ -315,6 +524,8 @@ class CsvPersister(BasePersister):
                     writer.writerow({k: str(v) for k, v in row.items()})
 
             self._batch = []
+            self._record_written(written)
+            return written
 
         except Exception as e:
             self.logger.error(f"Error writing batch to CSV: {str(e)}")
@@ -377,25 +588,27 @@ class SqlitePersister(BasePersister):
         Returns:
             True if successful
         """
-        try:
-            if isinstance(data, Result):
-                data = data.to_dict()
+        async with self._lock:
+            self._ensure_open()
+            try:
+                if isinstance(data, Result):
+                    data = data.to_dict()
 
-            if isinstance(data, list):
-                self._batch.extend(data)
-            else:
-                self._batch.append(data)
+                if isinstance(data, list):
+                    self._batch.extend(data)
+                else:
+                    self._batch.append(data)
 
-            if len(self._batch) >= self.batch_size:
-                await self._write_batch()
+                if len(self._batch) >= self.batch_size:
+                    await self._write_batch()
 
-            self.update_stats("save")
-            return True
+                self.update_stats("save")
+                return True
 
-        except Exception as e:
-            self.logger.error(f"Error saving to SQLite: {str(e)}")
-            self.update_stats("save", success=False)
-            return False
+            except Exception as e:
+                self.logger.error(f"Error saving to SQLite: {str(e)}")
+                self.update_stats("save", success=False)
+                return False
 
     async def load(self, query: Optional[Dict] = None) -> List[Dict]:
         """Load data from SQLite database.
@@ -438,12 +651,13 @@ class SqlitePersister(BasePersister):
             self.update_stats("load", success=False)
             return []
 
-    async def _write_batch(self) -> None:
-        """Write batched rows to database."""
+    async def _write_batch(self) -> int:
+        """Write batched rows to database and return the number of rows written."""
         if not self._batch:
-            return
+            return 0
 
         try:
+            written = len(self._batch)
             with sqlite3.connect(self.path) as conn:
                 c = conn.cursor()
 
@@ -467,6 +681,8 @@ class SqlitePersister(BasePersister):
                 conn.commit()
 
             self._batch = []
+            self._record_written(written)
+            return written
 
         except Exception as e:
             self.logger.error(f"Error writing batch to SQLite: {str(e)}")
@@ -570,6 +786,45 @@ class PersisterManager:
         except Exception as e:
             self.logger.error(f"Error loading from {persister}: {str(e)}")
             return []
+
+    async def flush(self) -> Dict[str, int]:
+        """Flush every backend and report how many items each wrote.
+
+        A failure in one backend is logged and reported as 0 without preventing
+        the other backends from flushing.
+        """
+        results: Dict[str, int] = {}
+        for name, persister in self._persisters.items():
+            try:
+                results[name] = await persister.flush()
+            except Exception as e:
+                self.logger.error(f"Error flushing {name}: {str(e)}")
+                results[name] = 0
+        return results
+
+    async def close(self) -> Dict[str, bool]:
+        """Close every backend, flushing pending batches first.
+
+        Idempotent. A failure in one backend is reported as ``False`` and does
+        not stop the remaining backends from closing.
+        """
+        results: Dict[str, bool] = {}
+        for name, persister in self._persisters.items():
+            try:
+                await persister.close()
+                results[name] = True
+            except Exception as e:
+                self.logger.error(f"Error closing {name}: {str(e)}")
+                results[name] = False
+        return results
+
+    async def __aenter__(self) -> "PersisterManager":
+        """Enter the asynchronous context."""
+        return self
+
+    async def __aexit__(self, exc_type, exc, tb) -> None:
+        """Close every backend on context exit."""
+        await self.close()
 
     def get_stats(self) -> Dict[str, dict]:
         """Get statistics from all persisters.

@@ -7,13 +7,15 @@ This module provides the base Spider class with the following features:
 - Event hooks and signals
 """
 
+from __future__ import annotations
+
 import asyncio
 import inspect
 import logging
 import time
 from collections import defaultdict
 from collections.abc import Iterable
-from typing import Any, AsyncGenerator, Callable, Dict, List, Optional, Union
+from typing import TYPE_CHECKING, Any, AsyncGenerator, Callable, Dict, List, Optional, Union
 
 from webants.downloader import Downloader
 from webants.libs.request import Request
@@ -21,6 +23,11 @@ from webants.libs.result import Result
 from webants.parser import Parser
 from webants.scheduler import Scheduler, ScheduleReason, ScheduleResult, ScheduleSlot
 from webants.utils.logger import get_logger
+
+if TYPE_CHECKING:
+    from webants.libs.config import Config
+    from webants.libs.middleware import MiddlewareManager
+    from webants.libs.persister import PersisterManager
 
 
 class Signal:
@@ -56,7 +63,18 @@ class Signal:
             ```
         Returns:
             None
+
+        Raises:
+            TypeError: If ``handler`` is a coroutine function. This signal is
+                synchronous; async handlers belong to
+                ``webants.libs.signals.signal_manager``.
         """
+        if inspect.iscoroutinefunction(handler):
+            raise TypeError(
+                "Spider.signals is synchronous and cannot accept a coroutine "
+                "function; use webants.libs.signals.signal_manager for async "
+                "handlers"
+            )
         self.handlers[signal].append(handler)
 
     def send(self, signal: str, sender: Any, **kwargs) -> None:
@@ -143,48 +161,130 @@ class Spider:
     def __init__(
         self,
         *,
-        concurrent_requests: int = 10,
-        request_timeout: float = 30,
-        retry_times: int = 3,
-        retry_delay: float = 1.0,
-        log_level: int = logging.INFO,
-        failure_threshold: int = 5,
-        recovery_timeout: float = 60.0,
+        concurrent_requests: int | None = None,
+        request_timeout: float | None = None,
+        retry_times: int | None = None,
+        retry_delay: float | None = None,
+        log_level: int | str | None = None,
+        failure_threshold: int | None = None,
+        recovery_timeout: float | None = None,
         idle_grace: float = 0.5,
+        middleware_max_retries: int = 3,
+        config: Config | None = None,
+        middleware: MiddlewareManager | None = None,
+        persister: PersisterManager | None = None,
         **kwargs,
     ):
         """Initialize spider with configuration.
 
         Args:
-            concurrent_requests: Maximum concurrent requests
+            concurrent_requests: Maximum concurrent requests. Overrides the
+                corresponding config value when provided.
             request_timeout: Request timeout in seconds
             retry_times: Number of times to retry failed requests
             retry_delay: Delay between retries in seconds
-            log_level: Logging level
+            log_level: Logging level (int or level name)
             failure_threshold: Number of failures before circuit breaker opens
             recovery_timeout: Time before circuit breaker attempts recovery
             idle_grace: Seconds the queue and the in-flight table must stay
                 empty before the main loop exits. 0 exits as soon as both are
                 empty (useful in tests).
-            **kwargs: Additional configuration
+            middleware_max_retries: Maximum times a middleware may replace a
+                failed request through ``process_exception``.
+            config: Optional explicit configuration. Values are used only when
+                the matching constructor argument is not provided.
+            middleware: Optional middleware chain. The spider calls its
+                ``lookup``/``process_request``/``process_response``/
+                ``process_exception`` phases.
+            persister: Optional persister manager. Ownership transfers to the
+                spider: ``close()`` flushes and closes it.
+            **kwargs: Additional configuration added to ``settings``
         """
+
+        def config_value(path: str, default: Any) -> Any:
+            if config is None:
+                return default
+            return config.get(path, default)
+
+        downloader_concurrency = (
+            concurrent_requests
+            if concurrent_requests is not None
+            else config_value("downloader.concurrent_requests", 10)
+        )
+        if concurrent_requests is not None:
+            scheduler_concurrency = concurrent_requests
+        elif config is not None:
+            scheduler_concurrency = config_value(
+                "scheduler.max_domain_concurrent", downloader_concurrency
+            )
+        else:
+            scheduler_concurrency = downloader_concurrency
+
+        request_timeout = (
+            request_timeout
+            if request_timeout is not None
+            else config_value("downloader.request_timeout", 30)
+        )
+        retry_times = (
+            retry_times
+            if retry_times is not None
+            else config_value("downloader.retry_times", 3)
+        )
+        retry_delay = (
+            retry_delay
+            if retry_delay is not None
+            else config_value("downloader.retry_delay", 1.0)
+        )
+        failure_threshold = (
+            failure_threshold
+            if failure_threshold is not None
+            else config_value("spider.failure_threshold", 5)
+        )
+        recovery_timeout = (
+            recovery_timeout
+            if recovery_timeout is not None
+            else config_value("spider.recovery_timeout", 60.0)
+        )
+        if log_level is None:
+            log_level = self._coerce_log_level(config_value("logging.level", "INFO"))
+        elif isinstance(log_level, str):
+            log_level = self._coerce_log_level(log_level)
+
+        self.config = config
+        self.middleware = middleware
+        self.persister = persister
+        self.middleware_max_retries = middleware_max_retries
+
         self.logger = get_logger(self.name, log_level=log_level)
 
         # Component initialization with performance monitoring
         self.scheduler = Scheduler(
-            max_domain_concurrent=concurrent_requests, log_level=log_level
+            max_requests=config_value("scheduler.max_requests", 0),
+            request_delay=config_value("scheduler.request_delay", 0),
+            domain_delay=config_value("scheduler.domain_delay", 0),
+            max_domain_concurrent=scheduler_concurrency,
+            log_level=log_level,
+            max_queue_size=config_value("scheduler.max_queue_size", 10000),
         )
         self.downloader = Downloader(
-            concurrency=concurrent_requests,
+            concurrency=downloader_concurrency,
             log_level=log_level,
             timeout=request_timeout,
+            retry_delay=retry_delay,
         )
-        self.parser = Parser(log_level=log_level)
+        self.parser = Parser(
+            encoding=config_value("parser.default_encoding", "utf-8"),
+            max_document_size=config_value(
+                "parser.max_document_size", 10 * 1024 * 1024
+            ),
+            cache_size=config_value("parser.cache_size", 1000),
+            log_level=log_level,
+        )
 
         # Configuration
         self.settings = {
             **self.custom_settings,
-            "CONCURRENT_REQUESTS": concurrent_requests,
+            "CONCURRENT_REQUESTS": downloader_concurrency,
             "REQUEST_TIMEOUT": request_timeout,
             "RETRY_TIMES": retry_times,
             "RETRY_DELAY": retry_delay,
@@ -218,6 +318,11 @@ class Spider:
             "retry_count": 0,
             "circuits_open": 0,
             "avg_request_time": 0.0,
+            "filtered_requests": 0,
+            "filtered_responses": 0,
+            "middleware_retries": 0,
+            "cache_hits": 0,
+            "persist_failures": 0,
             "domain_stats": defaultdict(dict),
         }
 
@@ -231,6 +336,22 @@ class Spider:
         # Signal system
         self.signals = Signal()
         self._setup_signals()
+
+    @staticmethod
+    def _coerce_log_level(value: Any) -> int:
+        """Convert a logging level name or number to an int."""
+        if isinstance(value, int) and not isinstance(value, bool):
+            return value
+
+        name = str(value).upper()
+        level = logging.getLevelName(name)
+        if isinstance(level, int):
+            return level
+
+        logging.getLogger("Spider").warning(
+            f"Unknown logging level {value!r}, using INFO"
+        )
+        return logging.INFO
 
     def _setup_signals(self) -> None:
         """Setup default signal handlers."""
@@ -421,11 +542,117 @@ class Spider:
             await self._schedule(item)
         elif isinstance(item, Result):
             self.signals.send("item_scraped", self, item=item)
+            await self._persist_item(item)
         else:
             raise TypeError(
                 f"callback yielded unsupported type {type(item).__name__}; "
                 f"expected Request or Result"
             )
+
+    async def _persist_item(self, item: Result) -> None:
+        """Persist one result without turning success into request failure."""
+        if self.persister is None:
+            return
+
+        try:
+            results = await self.persister.save(item)
+        except Exception as e:
+            self.stats["persist_failures"] += 1
+            self.logger.error(f"Error persisting result for {item.url}: {e}")
+            return
+
+        failed = [name for name, success in results.items() if not success]
+        if failed:
+            self.stats["persist_failures"] += len(failed)
+            self.logger.error(
+                f"Persisting result for {item.url} failed for: {', '.join(failed)}"
+            )
+
+    async def _prepare_response(
+        self, request: Request
+    ) -> Optional[tuple[Request, Any]]:
+        """Run the middleware phases that precede the callback.
+
+        Returns:
+            ``(request, response)`` where ``request`` is the request actually
+            used (middleware may replace it), or ``None`` when middleware
+            filtered the request or the response.
+        """
+        if self.middleware is None:
+            return request, await self.downloader.fetch(request)
+
+        response = await self.middleware.lookup(request)
+        if response is not None:
+            self.stats["cache_hits"] += 1
+        else:
+            prepared = await self.middleware.process_request(request)
+            if prepared is None:
+                self.stats["filtered_requests"] += 1
+                self.signals.send(
+                    "request_dropped", self, request=request, reason="middleware"
+                )
+                return None
+
+            if self._get_domain(prepared.url) != self._get_domain(request.url):
+                raise ValueError(
+                    "middleware.process_request must not change the request "
+                    f"domain: {request.url} -> {prepared.url}"
+                )
+
+            request = prepared
+            response = await self.downloader.fetch(request)
+
+        response = await self.middleware.process_response(response, request)
+        if response is None:
+            self.stats["filtered_responses"] += 1
+            return None
+
+        return request, response
+
+    async def _apply_middleware_exception(
+        self, exception: Exception, request: Request
+    ) -> tuple[str, Any]:
+        """Ask middleware how to handle a failed request.
+
+        Returns:
+            ``("none", None)`` to use the normal failure path,
+            ``("retry", Request)`` to reschedule the replacement, or
+            ``("response", response)`` to substitute a response.
+        """
+        if self.middleware is None:
+            return "none", None
+
+        try:
+            replacement = await self.middleware.process_exception(exception, request)
+        except Exception as middleware_error:
+            self.logger.error(
+                f"Error in middleware.process_exception for {request.url}: "
+                f"{middleware_error}"
+            )
+            return "none", None
+
+        if replacement is None:
+            return "none", None
+        if not isinstance(replacement, Request):
+            return "response", replacement
+
+        meta = request.meta if isinstance(request.meta, dict) else {}
+        try:
+            retries = int(meta.get("_middleware_retry", 0))
+        except (TypeError, ValueError):
+            retries = 0
+        if retries >= self.middleware_max_retries:
+            self.logger.warning(
+                f"Middleware retry limit reached for {request.url} "
+                f"({self.middleware_max_retries})"
+            )
+            return "none", None
+
+        replacement.meta = {
+            **(replacement.meta if isinstance(replacement.meta, dict) else {}),
+            "_middleware_retry": retries + 1,
+        }
+        return "retry", replacement
 
     async def process_request(
         self, request: Request, *, slot: Optional[ScheduleSlot] = None
@@ -460,7 +687,11 @@ class Spider:
                 )
                 return
 
-            response = await self.downloader.fetch(request)
+            prepared = await self._prepare_response(request)
+            if prepared is None:
+                return
+            request, response = prepared
+
             await self._invoke_callback(request, response)
 
             circuit.record_success()
@@ -468,6 +699,40 @@ class Spider:
             self.signals.send("request_finished", self, request=request, success=True)
 
         except Exception as e:
+            action, replacement = await self._apply_middleware_exception(e, request)
+
+            if action == "retry":
+                try:
+                    result = await self._schedule(replacement)
+                except Exception as schedule_error:
+                    self.logger.error(
+                        f"Error scheduling middleware retry for {request.url}: "
+                        f"{schedule_error}"
+                    )
+                    e = schedule_error
+                else:
+                    self.stats["middleware_retries"] += 1
+                    if not result:
+                        reason = result.reason.value if result else "closed"
+                        self.logger.warning(
+                            f"Middleware retry for {request.url} was not "
+                            f"scheduled: {reason}"
+                        )
+                    return
+
+            elif action == "response":
+                try:
+                    await self._invoke_callback(request, replacement)
+                except Exception as callback_error:
+                    e = callback_error
+                else:
+                    circuit.record_success()
+                    self.stats["successful_requests"] += 1
+                    self.signals.send(
+                        "request_finished", self, request=request, success=True
+                    )
+                    return
+
             was_open = circuit.state == "open"
             circuit.record_failure()
             if not was_open and circuit.state == "open":
@@ -520,6 +785,21 @@ class Spider:
         if exc is not None:
             self.stats["unhandled_task_errors"] += 1
             self.logger.error(f"Unhandled task error: {exc!r}", exc_info=exc)
+
+    async def _close_persister(self) -> None:
+        """Flush and close the persister without blocking shutdown."""
+        if self.persister is None:
+            return
+
+        try:
+            results = await self.persister.close()
+        except Exception as e:
+            self.logger.error(f"Error closing persister: {e}")
+            return
+
+        failed = [name for name, success in results.items() if not success]
+        if failed:
+            self.logger.error(f"Persister close failed for: {', '.join(failed)}")
 
     async def start(self) -> None:
         """Start the spider with monitoring.
@@ -614,13 +894,16 @@ class Spider:
             # 3. Hand back every queued permit nobody will consume.
             self.scheduler.discard_pending()
 
-            # 4. No task needs the network anymore.
+            # 4. Flush and close storage; a failure must not block shutdown.
+            await self._close_persister()
+
+            # 5. No task needs the network anymore.
             await self.downloader.close()
 
-            # 5. Announce exactly once.
+            # 6. Announce exactly once.
             self.signals.send("spider_stopped", self)
 
-            # 6. Terminal state.
+            # 7. Terminal state.
             self._closed = True
 
             if self._start_time:
@@ -646,7 +929,7 @@ class Spider:
         Returns:
             Dictionary with spider statistics
         """
-        return {
+        stats = {
             **self.stats,
             "scheduler_stats": self.scheduler.get_stats(),
             "parser_stats": self.parser.get_stats(),
@@ -658,3 +941,8 @@ class Spider:
                 domain: cb.state for domain, cb in self._domain_circuits.items()
             },
         }
+        if self.middleware is not None:
+            stats["middleware_stats"] = self.middleware.get_stats()
+        if self.persister is not None:
+            stats["persister_stats"] = self.persister.get_stats()
+        return stats
