@@ -61,5 +61,11 @@ class TestItem:
 
 def test_invalid_html():
     item = TextItem(selector="p")
-    with pytest.raises(AssertionError):
+    with pytest.raises(TypeError, match="html"):
         item.html = 123
+
+    item.html = "<p>ok</p>"
+    assert item.field == ["ok"]
+
+    item.html = etree.fromstring("<p>element</p>")
+    assert item.field == ["element"]

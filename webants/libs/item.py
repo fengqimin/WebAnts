@@ -83,8 +83,24 @@ class _Item:
     # Data descriptor
     field = ExtractorDescriptor()
 
-    def __init__(self, html: str):
-        self.html: str = html
+    def __init__(self, html: str | None = None):
+        self.html = html
+
+    @property
+    def html(self):
+        """HTML source the item extracts from (str or lxml element)."""
+        return self._html
+
+    @html.setter
+    def html(self, value) -> None:
+        # ``None`` is allowed at construction time: subclasses build the item
+        # before the caller assigns the document.
+        if value is not None and not isinstance(value, (str, lxml.etree._Element)):
+            raise TypeError(
+                f"Expected html to be str, etree._Element or None, "
+                f"got {value.__class__.__name__}"
+            )
+        self._html = value
 
 
 class AttrItem(_Item):
