@@ -32,7 +32,7 @@ uv run playwright install chromium
 ## 7.3 验证安装
 
 ```bash
-# 已验证：1 failed, 75 passed in 15.08s
+# 已验证：1 failed, 123 passed
 uv run pytest -q
 
 # 已验证：17 个 F401

@@ -1,31 +1,35 @@
 # 09 代码索引
 
-按模块分组。`位置` 均为 `path:line`，对应 `master @ 23f8051`。`调用方` 只列仓库内已知调用点，`—` 表示无内部调用或仅由外部使用。
+按模块分组。`位置` 均为 `path:line`，对应 2026-11-05 工作区（ADR-0003 实施后）。`调用方` 只列仓库内已知调用点，`—` 表示无内部调用或仅由外部使用。
 
 ## 9.1 `webants/spider.py`
 
 | 符号 | 类型 | 位置 | 用途 | 调用方 |
 |------|------|------|------|--------|
-| `Signal` | class | `webants/spider.py:24` | 同步事件系统容器 | `Spider.__init__` |
-| `Signal.connect` | method | `:42` | 注册同步 handler | `Spider._setup_signals` |
-| `Signal.send` | method | `:60` | 同步调用所有 handler，异常吞掉并记日志 | `Spider.process_request` |
-| `CircuitBreaker` | class | `:70` | per-domain 三态熔断 | `Spider._get_circuit_breaker` |
-| `CircuitBreaker.record_failure` | method | `:109` | 累加失败，达阈值置 open | `Spider.process_request` |
-| `CircuitBreaker.record_success` | method | `:116` | 清零并关闭 | `Spider.process_request` |
-| `CircuitBreaker.allow_request` | method | `:121` | open 超时转 half-open | `Spider.process_request` |
-| `Spider` | class | `:134` | 爬虫基类 | 外部子类 |
-| `Spider.__init__` | method | `:141` | 组装组件、统计、信号 | 外部 |
-| `Spider._setup_signals` | method | `:219` | 连接五个默认 handler | `__init__` |
-| `Spider.start_requests` | async gen | `:271` | 由 `start_urls` 生成 `Request` | `Spider.start` |
-| `Spider.parse` | async method | `:286` | 默认 `raise NotImplementedError`；子类可用 async generator 覆盖 | 子类覆盖 |
-| `Spider.handle_error` | async method | `:300` | 默认 errback：只记录日志，不计数/不改熔断 | `Request.errback` |
-| `Spider._invoke_callback` | async method | `:317` | 调用回调一次并归一化 async generator/coroutine | `process_request` |
-| `Spider._consume_callback_value` | async method | `:348` | 归一化协程返回值（None/单项/可迭代/异步可迭代） | `_invoke_callback` |
-| `Spider._dispatch_item` | async method | `:375` | Request → Scheduler，Result → item_scraped | `_invoke_callback` |
-| `Spider.process_request` | async method | `:387` | 单请求完整处理（下载、回调、分发、清理） | `Spider.start` 的 task |
-| `Spider.start` | async method | `:448` | 生命周期主循环 | 外部 |
-| `Spider.close` | async method | `:479` | 关闭 downloader、发信号 | `Spider.start` 的 finally |
-| `Spider.get_stats` | method | `:497` | 聚合四组统计 | 外部 |
+| `Signal` | class | `webants/spider.py:26` | 同步事件系统容器 | `Spider.__init__` |
+| `Signal.connect` | method | `:44` | 注册同步 handler | `Spider._setup_signals` |
+| `Signal.send` | method | `:62` | 同步调用所有 handler，异常吞掉并记日志 | `Spider` 各处 |
+| `CircuitBreaker` | class | `:72` | per-domain 三态熔断 | `Spider._get_circuit_breaker` |
+| `CircuitBreaker.record_failure` | method | `:111` | 累加失败，达阈值置 open | `Spider.process_request` |
+| `CircuitBreaker.record_success` | method | `:118` | 清零并关闭 | `Spider.process_request` |
+| `CircuitBreaker.allow_request` | method | `:123` | open 超时转 half-open | `Spider.process_request` |
+| `Spider` | class | `:136` | 爬虫基类 | 外部子类 |
+| `Spider.__init__` | method | `:143` | 组装组件、统计、信号、关闭状态 | 外部 |
+| `Spider._setup_signals` | method | `:235` | 连接五个默认 handler | `__init__` |
+| `Spider.start_requests` | async gen | `:287` | 由 `start_urls` 生成 `Request` | `Spider.start` |
+| `Spider.parse` | async method | `:302` | 默认 `raise NotImplementedError`；子类可用 async generator 覆盖 | 子类覆盖 |
+| `Spider.handle_error` | async method | `:316` | 默认 errback：只记录日志，不计数/不改熔断 | `Request.errback` |
+| `Spider._invoke_callback` | async method | `:333` | 调用回调一次并归一化 async generator/coroutine | `process_request` |
+| `Spider._consume_callback_value` | async method | `:364` | 归一化协程返回值（None/单项/可迭代/异步可迭代） | `_invoke_callback` |
+| `Spider._schedule` | async method | `:391` | 入队并返回 `ScheduleResult`；已关闭时返回 `None` | `start`、`_dispatch_item` |
+| `Spider._dispatch_item` | async method | `:418` | Request → `_schedule`，Result → item_scraped | `_invoke_callback` |
+| `Spider.process_request` | async method | `:430` | 单请求完整处理（下载、回调、分发、`slot.release()`） | `Spider.start` 的 task、外部 |
+| `Spider._on_task_done` | method | `:503` | 清登记、刷新活动时钟、计取消/逃逸异常 | `Task.add_done_callback` |
+| `Spider.start` | async method | `:524` | 生命周期主循环；关闭后抛 `RuntimeError` | 外部 |
+| `Spider.close` | async method | `:584` | 幂等关闭：取消在飞、排空队列、关 client、发信号一次 | 外部、`start` 的 finally、`__aexit__` |
+| `Spider.__aenter__` | async method | `:635` | 返回 `self`，不自动 start | `async with` |
+| `Spider.__aexit__` | async method | `:639` | 调用一次 `close()` | `async with` |
+| `Spider.get_stats` | method | `:643` | 聚合四组统计，含 `closed`/`inflight_count` | 外部 |
 
 ## 9.2 `webants/scheduler.py`
 
@@ -34,10 +38,12 @@
 | `Scheduler` | class | `webants/scheduler.py:21` | 优先级调度器 | `Spider.__init__` |
 | `Scheduler.__init__` | method | `:24` | 建队列、去重集合、域名状态 | `Spider.__init__` |
 | `Scheduler._get_domain` | method | `:72` | 取 netloc 并去端口 | 内部 |
-| `Scheduler.schedule_request` | async method | `:78` | 去重、限流、延迟、入队 | `Spider.start`、`Spider._dispatch_item` |
-| `Scheduler.get_request` | async method | `:170` | 出队并应用全局延迟 | `Spider.start` |
-| `Scheduler.request_completed` | method | `:183` | 释放域名信号量、减计数 | `Spider.process_request` |
-| `Scheduler.get_stats` | method | `:198` | 队列与域名统计 | `Spider.get_stats` |
+| `Scheduler.schedule_request` | async method | `:265` | 去重、限流、延迟、入队；返回 `ScheduleResult` | `Spider._schedule` |
+| `Scheduler.get_request` | async method | `:367` | 非阻塞轮询出队并应用全局延迟；空队列返回 `None` | `Spider.start` |
+| `Scheduler.discard_pending` | method | `:392` | 关闭时释放全部排队 slot | `Spider.close` |
+| `Scheduler.request_completed` | method | `:415` | 兼容入口：按 URL 释放凭据（已弃用） | 旧调用方 |
+| `Scheduler.audit` | method | `:447` | 槽位对账与 `idle` 判定 | `Spider.close` 的验收断言 |
+| `Scheduler.get_stats` | method | `:492` | 队列与域名统计 | `Spider.get_stats` |
 
 ## 9.3 `webants/downloader.py`
 
@@ -61,9 +67,9 @@
 | `Downloader.fetch` | async method | `:335` | 下载 + 内部重试 + 失败异常；不调用回调 | `Spider.process_request` |
 | `Downloader.fetch_retry` | async method | `:431` | 兼容别名，委托给 `fetch` | 旧调用方 |
 | `Downloader.start_worker` | async method | `:435` | worker 兼容适配器 | `start_downloader` |
-| `Downloader.start_downloader` | async method | `:457` | 启动 N worker 并 join | 外部 |
-| `Downloader.close` | async method | `:474` | 关闭 client | `Spider.close` |
-| `Downloader.get_stats` | method | `:479` | 统计副本 | `Spider.get_stats` |
+| `Downloader.start_downloader` | async method | `:457` | 启动 N worker，`join` 后只取消自建 worker | 外部 |
+| `Downloader.close` | async method | `:475` | 关闭 client（幂等） | `Spider.close` |
+| `Downloader.get_stats` | method | `:480` | 统计副本 | `Spider.get_stats` |
 
 ## 9.4 `webants/parser.py`
 
@@ -254,15 +260,15 @@
 
 | 文件 | 用例数 | 覆盖对象 | 备注 |
 |------|--------|----------|------|
-| `tests/test_downloader.py` | 13（含参数化） | `Downloader.fetch` 重试/退避/`Retry-After`/body/cookies/统计 | 全部使用 `httpx.MockTransport`，不访问网络 |
+| `tests/test_downloader.py` | 14（含参数化） | `Downloader.fetch` 重试/退避/`Retry-After`/body/cookies/统计、worker 取消边界 | 全部使用 `httpx.MockTransport`，不访问网络 |
 | `tests/test_request.py` | 9 | 回调双类型、errback、`cb_kwargs` 校验 | 覆盖 C1 契约 |
-| `tests/test_spider.py` | 10 | 主链路、异步生成器/协程回调、errback、下载失败、资源释放 | 覆盖 C3/C6，全部离线 |
+| `tests/test_spider.py` | 24 | 主链路、异步生成器/协程回调、errback、下载失败、关闭/取消/`idle_grace` | 覆盖 C3/C6 与 ADR-0003 E1–E5，全部离线 |
 | `tests/test_extractor.py` | 20（含参数化） | 函数式提取、四类 Extractor、工厂、Link 变体 | 覆盖 `FilteringLinkExtractor` 默认 normalize |
 | `tests/test_item.py` | 6 | 四类 Item + 四类 Descriptor | `test_invalid_html` 仍失败（P1-12） |
 | `tests/test_parser.py` | 18（含参数化） | 解析、选择器、缓存、错误 | 覆盖编码/超限/空内容 |
 | `tests/test_result.py` | 13 | `Field` / `Result` | 覆盖校验与序列化 |
-| `tests/test_scheduler.py` | 9 | 初始化、去重、上限、并发、完成、统计、延迟 | 域名并发用 `asyncio.wait` |
+| `tests/test_scheduler.py` | 20 | 初始化、去重、上限、并发、完成、统计、延迟、slot 对账 | 域名并发用 `asyncio.wait` |
 | `tests/conftest.py` | — | `http_client`、`sample_html` fixture | 将仓库根加入 `sys.path` |
 | `example/use_item.py` | — | `LinkItemDescriptor` / `TextItemDescriptor` | import 即执行 |
 
-合计 98 个测试用例（`uv run pytest -q` 报告 97 passed + 1 failed；失败为已知的 `tests/test_item.py::test_invalid_html`，对应 P1-12）。
+合计 124 个测试用例（`uv run pytest -q` 报告 123 passed + 1 failed；失败为已知的 `tests/test_item.py::test_invalid_html`，对应 P1-12）。

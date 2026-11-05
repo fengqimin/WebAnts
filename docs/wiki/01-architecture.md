@@ -36,7 +36,7 @@ flowchart TD
 
 | 层 | 组成 | 是否在运行路径 | 证据 |
 |----|------|----------------|------|
-| 入口/生命周期 | `Spider.__init__`、`start`、`close`、`get_stats` | 是 | `webants/spider.py:141-466` |
+| 入口/生命周期 | `Spider.__init__`、`start`、`close`、`get_stats` | 是 | `webants/spider.py:143-652` |
 | 调度 | `Scheduler` | 是 | `webants/scheduler.py:21-208` |
 | 下载 | `BaseDownloader`、`Downloader` | 是 | `webants/downloader.py:22-418` |
 | 解析 | `Parser` | 是（需调用方显式使用） | `webants/parser.py:26-262` |
@@ -85,11 +85,13 @@ sequenceDiagram
         CB-->>SP: async for / 归一化后的 Request | Result
         SP->>SCH: schedule_request(新 Request)
         SP->>SP: signals.send item_scraped
-        SP->>SCH: request_completed(request)
+        SP->>SP: finally: slot.release()
     end
+    U->>SP: await close()
+    SP->>SP: 取消在飞 → 排空队列 → 关 client → spider_stopped
 ```
 
-> 依据 [ADR-0001](../adr/0001-callback-contract-and-retry-ownership.md)：`Downloader.fetch` 不再调用回调，重试内联；`Spider._invoke_callback` 单点归一化 async generator / coroutine。实现见 `webants/spider.py:317-446`、`webants/downloader.py:335-432`。
+> 依据 [ADR-0001](../adr/0001-callback-contract-and-retry-ownership.md)：`Downloader.fetch` 不再调用回调，重试内联；`Spider._invoke_callback` 单点归一化 async generator / coroutine。依据 [ADR-0002](../adr/0002-schedule-slot-ownership-and-request-lifecycle.md)：调度资源以 `ScheduleSlot` 为凭据，由 `process_request` 的 `finally` 释放；`request_completed` 仅为兼容入口。实现见 `webants/spider.py:333-501`、`webants/downloader.py:335-432`。
 
 ### 下载重试与 worker 兼容适配器
 
@@ -111,13 +113,17 @@ flowchart TD
     L --> N
 ```
 
-证据：`webants/downloader.py:335-432`、`435-457`。`Spider.process_request` 也调用同一个 `fetch`（`webants/spider.py:408`），Spider 级 `_failed_urls` / `retry_failed` 已随 ADR-0001 移除；worker 模式仅是兼容适配器，不再跨队列重试。
+证据：`webants/downloader.py:335-432`、`:435-472`。`Spider.process_request` 也调用同一个 `fetch`（`webants/spider.py:463`），Spider 级 `_failed_urls` / `retry_failed` 已随 ADR-0001 移除；worker 模式仅是兼容适配器，不再跨队列重试。`start_downloader` 只取消并回收自己创建的 worker，不再调用 `asyncio.all_tasks()`（[ADR-0003](../adr/0003-shutdown-cancellation-and-loop-quiescence.md) §2.5）。
+
+### 关闭与收敛
+
+关闭是**终态**：`close()` 返回后 `_inflight` 为空、队列为空、`scheduler.audit()["idle"]` 为真、client 已关闭、`spider_stopped` 恰好发送一次；之后 `start()` 抛 `RuntimeError`。严格顺序为「停主循环 → 取消在飞任务并 `gather` → `discard_pending()` → `downloader.close()` → 发信号 → 置 `_closed`」。`close()` 幂等且可在未 `start()` 时调用。主循环的退出条件是「`get_request()` 返回 `None` ∧ `_inflight` 为空 ∧ 静默时长 ≥ `idle_grace`」。契约见 [ADR-0003](../adr/0003-shutdown-cancellation-and-loop-quiescence.md)，实现见 `webants/spider.py:503-641`。
 
 ## 1.5 目录 → 责任
 
 | 目录/文件 | 责任 | 关键入口 |
 |-----------|------|----------|
-| `webants/spider.py` | 生命周期、信号、熔断、统计、回调归一化 | `Spider.start` `:448` |
+| `webants/spider.py` | 生命周期、信号、熔断、统计、回调归一化 | `Spider.start` `:524` |
 | `webants/scheduler.py` | 队列、去重、域名并发、延迟 | `Scheduler.schedule_request` `:78` |
 | `webants/downloader.py` | HTTP、重试、退避、`Retry-After`、统计 | `Downloader.fetch` `:335` |
 | `webants/parser.py` | 解析、缓存、选择器 | `Parser.parse` `:107` |
@@ -163,7 +169,7 @@ flowchart TD
 ## 1.8 非功能特性
 
 - **并发**：调度器为每个域名建 `asyncio.Semaphore(max_domain_concurrent)`（`webants/scheduler.py:111-113`），下载器另有 `asyncio.Semaphore(concurrency)`（`webants/downloader.py:154`）。两者默认值都来自 `Spider(concurrent_requests=10)`，但分属不同层，实际并发是两层约束的叠加。
-- **可靠性**：重试完全内聚在 `Downloader.fetch`（`webants/downloader.py:335-432`）；耗尽后抛 `RequestError`，`Spider.process_request` 走 errback 一次。Spider 级 `_failed_urls` 已随 ADR-0001 移除；主循环在队列为空时仍会阻塞在 `get_request()`（P1-02）。
+- **可靠性**：重试完全内聚在 `Downloader.fetch`（`webants/downloader.py:335-432`）；耗尽后抛 `RequestError`，`Spider.process_request` 走 errback 一次。Spider 级 `_failed_urls` 已随 ADR-0001 移除；主循环按 `poll_interval` 轮询而非阻塞，退出需同时满足「队列空 ∧ 无在飞任务 ∧ 静默 ≥ `idle_grace`」，关闭走 ADR-0003 的释放顺序。
 - **可观测性**：`Spider.get_stats()` 聚合 scheduler/parser/downloader 统计（`webants/spider.py:450-466`）；日志通过 `get_logger` 按名字复用 handler（`webants/utils/logger.py:31-35`）。
 - **安全**：框架不处理认证、不校验目标站点、默认跟随重定向并带固定 UA（`webants/downloader.py:150,187-190`）；SQLite 表名用 f-string 拼接（`webants/libs/persister.py:354,451`），仅在配置可信时安全。
 - **可移植性**：`setup.py` 声明 `Operating System :: Microsoft :: Windows`（`setup.py:33`），但源码本身使用 `pathlib`，跨平台障碍主要来自测试与示例中的硬编码路径。
@@ -172,11 +178,11 @@ flowchart TD
 
 | 风险 | 说明 | 关联问题 |
 |------|------|----------|
-| 主链路回调已修复，但生命周期不完整 | `Downloader.fetch` 不再调用回调；Spider 归一化调用；`_processing`/`request_completed` 已容错，但主循环无超时 | P0-01 Closed；P1-02 仍在 |
-| 调度/处理生命周期耦合 | `request_completed` 假设请求一定入队过；主循环无超时 | P1-01、P1-02 |
+| 主链路回调已修复，生命周期已收敛 | `Downloader.fetch` 不再调用回调；Spider 归一化调用；`_inflight` 按 task 登记，关闭顺序与终态可断言 | P0-01、P1-02、P2-23 Closed |
+| 调度/处理生命周期已解耦 | 调度资源以 `ScheduleSlot` 为凭据，`finally` 释放；`request_completed` 仅为兼容入口 | P1-01、P1-04、P2-20 Closed |
 | 可选层“存在但不可用” | 中间件、持久化、配置、异步信号均未接入 | P1-11 |
 | 重试语义分裂 | 已按 ADR-0001 收敛到 `Downloader.fetch`；`fetch_retry` 仅别名 | ~~P1-03、P2-01~~ Closed |
 | 数据易丢失 | Persister 无 flush；无进程退出钩子 | P1-09 |
 | 配置合并错误 | 嵌套 YAML 会被拍平到顶层 | P1-06 |
 
-架构层面的建议顺序：回调契约（P0-01）与重试归属（P1-03）已冻结并落地；下一步修生命周期（P1-01/02/04/18/20），最后决定可选层是接入还是移出文档承诺（P1-11）。
+架构层面的建议顺序：回调契约（P0-01）、重试归属（P1-03）与生命周期/关闭契约（P1-01/02/04/18/20、P2-20/23）均已冻结并落地；下一步处理数据正确性问题簇（8.11 阶段 3），最后决定可选层是接入还是移出文档承诺（P1-11）。

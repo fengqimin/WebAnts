@@ -109,9 +109,9 @@ flowchart TD
 
 | 命令 | 结果 | 说明 |
 |------|------|------|
-| `uv run pytest -q` | **1 failed, 75 passed in 15.08s** | 失败用例 `tests/test_item.py::test_invalid_html` |
+| `uv run pytest -q` | **1 failed, 123 passed** | 失败用例仍为 `tests/test_item.py::test_invalid_html`（P1-12） |
 | `uv run ruff check .` | **Found 17 errors**，全部为 `F401` 未使用导入 | 分布：`example/use_item.py` 7 处、`tests/test_item.py` 1 处、`webants/libs/config.py` 1 处、`middleware.py` 2 处、`signals.py` 3 处、`statistic.py` 3 处 |
-| `uv run isort --check .` | 7 个文件 “Imports are incorrectly sorted” | `item.py`、`middleware.py`、`result.py`、`signals.py`、`misc.py`、`statistic.py`、`url.py` |
+| `uv run isort --check .` | **无法运行**（`Failed to canonicalize script path`） | 改用 `uv run python -m isort --check-only .`：17 个文件不合格、2 个跳过 |
 | `uv run black --check .` | 无法运行 | `Failed to canonicalize script path`，black 未安装/未声明 |
 
 `ruff` 的 17 个错误都是可自动修复的 `F401`，不影响运行，但说明仓库未在提交前执行 lint。
@@ -120,8 +120,8 @@ flowchart TD
 
 | 热点 | 表现 | 影响 |
 |------|------|------|
-| `Downloader` 与回调契约 | 下载器直接 `await request.callback(...)`，Spider 又迭代回调返回值 | 主链路不可用（P0-01） |
-| `Scheduler` 与 `Spider` 生命周期 | 入队 acquire 信号量、`request_completed` 释放；Spider 假定一一对应 | 未入队请求触发 `KeyError`（P1-01） |
+| `Downloader` 与回调契约 | `fetch` 只下载，Spider 统一调用并归一化回调 | 已按 ADR-0001 收敛（P0-01 Closed） |
+| `Scheduler` 与 `Spider` 生命周期 | 入队返回 `ScheduleSlot`，`process_request` 的 `finally` 释放；Spider 关闭时取消在飞并 `discard_pending()` | 槽位模型见 ADR-0002、关闭契约见 ADR-0003（P1-01/04、P2-20/23 Closed） |
 | `Parser` 类级缓存 | `lru_cache` 修饰实例方法，key 含 `self` | 实例无法回收、统计失真（P1-07） |
 | `ExtractorFactory` 元类注册表 | 类字典全局可变，按前缀匹配 | 新增/重名提取器行为隐式 |
 | `utils/statistic.py` | 顶层 `import psutil` | 未安装即无法 import 整个模块（P2-06） |

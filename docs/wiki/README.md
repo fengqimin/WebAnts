@@ -2,17 +2,17 @@
 
 | 项目 | 内容 |
 |------|------|
-| 代码版本 | `master` @ `23f8051`（`fix: correct method name from get_stsats to get_stats in Downloader class`） |
-| 生成日期 | 2026-11-03 |
+| 代码版本 | 2026-11-05 工作区（ADR-0003 实施后） |
+| 生成日期 | 2026-11-03；2026-11-05 同步 |
 | 文档范围 | `webants/`（全部 Python 源码）、`tests/`、`pyproject.toml`、`setup.py`、`requirements.txt`、`readme*.md`、`docs/architecture.md`、`example/use_item.py` |
 | 数据快照 | 仓库内无 SQLite 数据库文件；仅 `data/html/awesome-python.html`（约 152 KB 样例 HTML），未做行数统计 |
-| 运行验证 | `uv run pytest -q` → 1 failed, 97 passed（2026-11-04）；`uv run ruff check .` → 17 errors（全部既有 F401）；`uv run isort --check .` → 11 个文件不合格、2 个跳过；`uv run black --check .` → 不可用；问题与修复状态见 [08](08-issues-and-recommendations.md) |
+| 运行验证 | `uv run pytest -q` → 1 failed, 123 passed（2026-11-05）；`uv run ruff check .` → 17 errors（全部既有 F401）；`uv run python -m isort --check-only .` → 17 个文件不合格、2 个跳过；`uv run black --check .` → 不可用；问题与修复状态见 [08](08-issues-and-recommendations.md) |
 
 ## 这个项目是什么
 
 WebAnts 是一个用 `httpx` + `lxml` 实现的异步爬虫框架。它把爬取过程拆成四个可替换的角色：`Spider` 负责生命周期与统计，`Scheduler` 负责优先级队列、去重、域名并发与自适应延迟，`Downloader` 负责 HTTP 请求与按状态码重试，`Parser` 负责 HTML 解析与 CSS/XPath 提取。仓库同时提供了一套更细粒度的 Request/Result/Item/Extractor 抽象，以及中间件、持久化、异步信号、YAML 配置、异常追踪等可选层。
 
-当前版本是 `0.1.1`。主链路的回调契约与重试已按 [ADR-0001](../adr/0001-callback-contract-and-retry-ownership.md) 接通；生命周期、调度器与可选层仍在按 [08](08-issues-and-recommendations.md) 的路线修复。
+当前版本是 `0.1.1`。主链路的回调契约与重试已按 [ADR-0001](../adr/0001-callback-contract-and-retry-ownership.md) 接通；调度槽位与关闭/取消契约分别按 [ADR-0002](../adr/0002-schedule-slot-ownership-and-request-lifecycle.md)、[ADR-0003](../adr/0003-shutdown-cancellation-and-loop-quiescence.md) 落地；数据正确性与可选层仍在按 [08](08-issues-and-recommendations.md) 的路线修复。
 
 ## 一页速览
 
@@ -24,8 +24,8 @@ WebAnts 是一个用 `httpx` + `lxml` 实现的异步爬虫框架。它把爬取
 | 入口 | 无 CLI、无 HTTP 服务；继承 `webants.spider.Spider` 并调用 `await spider.start()` |
 | 数据流 | `Spider → Scheduler → Downloader → Parser/回调 → Scheduler / Spider` |
 | 数据落盘 | `libs/persister.py` 的 JSON / CSV / SQLite（默认未接入 Spider） |
-| 测试 | `pytest` + `pytest-asyncio`（`asyncio_mode=auto`），6 个测试文件、76 个用例 |
-| 代码规模 | 源码 + 测试共 7,295 行（`wc -l`） |
+| 测试 | `pytest` + `pytest-asyncio`（`asyncio_mode=auto`），9 个测试文件、124 个用例 |
+| 代码规模 | 源码 + 测试共 9,396 行（`wc -l`） |
 
 ## 按角色阅读路径
 
@@ -78,7 +78,7 @@ WebAnts 是一个用 `httpx` + `lxml` 实现的异步爬虫框架。它把爬取
 # 安装依赖（本次未执行，标注为未验证）
 uv sync
 
-# 运行测试（已验证：1 failed, 97 passed）
+# 运行测试（已验证：1 failed, 123 passed）
 uv run pytest -q
 
 # 只跑某个测试文件
@@ -103,14 +103,15 @@ class MySpider(Spider):
             url=str(response.url),
         )
 
-# await MySpider().start()
+# async with MySpider() as spider:   # __aexit__ 保证 close
+#     await spider.start()           # 关闭后不可重启，每次爬取新建实例
 ```
 
-> 回调契约与重试已按 [ADR-0001](../adr/0001-callback-contract-and-retry-ownership.md) 修复；但主循环仍存在无超时等待、任务未跟踪的问题（P1-02），`start()` 在队列空时可能不会退出。当前示例适合配合 `tests/test_spider.py` 的离线驱动方式使用。
+> 回调契约与重试已按 [ADR-0001](../adr/0001-callback-contract-and-retry-ownership.md) 修复；关闭、取消与主循环收敛已按 [ADR-0003](../adr/0003-shutdown-cancellation-and-loop-quiescence.md) 落地（P1-02、P1-20、P2-23 Closed）。`start()` 在主循环收敛后自动 `close()`；也可以显式 `await spider.close()`。
 
 ## 维护约定
 
-- 本 Wiki 对应 `master` 的 `23f8051`。代码变更后请同步更新受影响章节的行号引用，并在 `README.md` 顶部更新 commit 与“运行验证”列。
+- 本 Wiki 对应 2026-11-05 工作区（ADR-0003 实施后）。代码变更后请同步更新受影响章节的行号引用，并在 `README.md` 顶部更新 commit 与“运行验证”列。
 - 行号一律相对仓库根目录，格式为 `path:line`；跨章节引用使用 `.md` 相对链接。
 - 问题编号（`P0-01`、`P1-03` 等）在 [08](08-issues-and-recommendations.md) 定义，其他章节只引用、不重复定义。
 - 结构校验：`python C:\Users\fengq\.qwenworkcn\skills\code-wiki-generator\scripts\validate_wiki.py docs/wiki`。

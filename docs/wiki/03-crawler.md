@@ -1,6 +1,6 @@
 # 03 爬虫主链路
 
-本章按一次爬取的顺序拆解 `Spider → Scheduler → Downloader → 解析/提取 → 回灌`。行号对应 2026-11-04 工作区（ADR-0001 实施后），基线逻辑仍来自 `master @ 23f8051`。
+本章按一次爬取的顺序拆解 `Spider → Scheduler → Downloader → 解析/提取 → 回灌`。行号对应 2026-11-05 工作区（ADR-0003 实施后）。
 
 ## 3.1 常量与默认值
 
@@ -20,7 +20,7 @@
 ## 3.2 阶段 1：构造与初始请求
 
 1. `Spider.__init__` 实例化三个组件：`Scheduler(max_domain_concurrent=concurrent_requests)`、`Downloader(concurrency=..., timeout=...)`、`Parser()`（`webants/spider.py:170-178`）。三者之间**没有注入关系**，各自持有独立状态。
-2. 初始化 `stats`、`_processing`、`_domain_circuits`，并注册五个默认信号处理器（`webants/spider.py:197-225`）。
+2. 初始化 `stats`、`_inflight`（task → Request）、`_domain_circuits`、`idle_grace`/`_last_activity`/`_closed`/`_close_lock`，并注册五个默认信号处理器（`webants/spider.py:200-241`）。
 3. `start_requests()` 遍历 `start_urls`，为每个 URL 构造 `Request(callback=self.parse, errback=self.handle_error, retries=..., timeout=...)`（`webants/spider.py:271-284`）。
 4. `Request.__init__` 校验 method/URL；callback 接受 `iscoroutinefunction` **或** `isasyncgenfunction`，errback 只接受 coroutine function；不满足时抛 `TypeError`（`webants/libs/request.py:99-122,167-222`）。
 
@@ -47,29 +47,48 @@
 
 ## 3.4 阶段 3：主循环与下载
 
-`Spider.start`（`webants/spider.py:448-490`）：
+`Spider.start`（`webants/spider.py:524-582`）：
 
-1. 幂等检查 `_running`，设置 `start_time`，发 `spider_started`。
-2. 把所有初始请求 `await schedule_request(...)`。
-3. `while self._running:` → `await scheduler.get_request()`；队列空且无处理中请求时 `break`，否则 `sleep(0.1)` 后重试（`:462-470`）。
-4. 取到请求后 `asyncio.create_task(process_request(request))`（`:472`）。
+1. 若 `_closed` 为真抛 `RuntimeError`（关闭是终态）；`_running` 为真则直接返回。
+2. 设置 `start_time`、`stats["start_time"]`、`_last_activity = time.monotonic()`，发 `spider_started`。
+3. 把所有初始请求 `await _schedule(...)`。
+4. `while self._running:` → `await scheduler.get_request()`。返回 `None` 时，仅当 **`_inflight` 为空 ∧ `time.monotonic() - _last_activity >= idle_grace`** 时 `break`，否则继续轮询（`default idle_grace=0.5`，传 `0` 退化为立即退出）。
+5. 取到 slot：刷新 `_last_activity`，`asyncio.create_task(process_request(request, slot=slot))`；在让出控制权前登记 `self._inflight[task] = request` 并挂 `_on_task_done`（`:563-577`）。
+6. 正常退出或异常统一走 `finally: await close()`。
 
-> 主循环仍没有超时等待，任务也未被跟踪（P1-02，属于第 2 阶段）。Spider 级重试已删除，`_failed_urls`/`retry_failed` 不再存在。
+> ADR-0003 冻结了收敛契约：时间窗而非空转次数，避免轮询粒度改变退出语义；阶段 4 接入异步生产者后，`idle_grace` 是可调的安全窗口。P1-02 已关闭。
 
-`process_request`（`webants/spider.py:387-446`）：
+任务结束回调 `_on_task_done`（同步函数，`:503-522`）：
 
-1. 计时、`total_requests+1`、`_processing.add(url)`（`:393-395`）。
-2. 取域名熔断器；`allow_request()` 为假时记录日志并 `return`。判断位于 `try` 内，`finally` 仍会释放资源（`:400-404`）。
-3. 发 `request_scheduled` 信号（`:406`）。
-4. `response = await self.downloader.fetch(request)`（`:407`）。
-5. **只调用一次** `_invoke_callback(request, response)`（`:317-346`）：
+1. 从 `_inflight` 移除该 task，并刷新 `_last_activity`。
+2. `task.cancelled()` → `cancelled_requests+1`，直接返回（取消不是失败）。
+3. 否则 `task.exception()` **消费异常**（避免 GC 时 “Task exception was never retrieved”）；非空时 `unhandled_task_errors+1` 并带 traceback 记 error。`process_request` 已捕获 `Exception`，此处只会看到逃逸的 `BaseException`（如自定义 `BaseException`、`MemoryError`）。
+
+`process_request`（`webants/spider.py:430-501`）：
+
+1. 计时、`total_requests+1`；若当前 task 未被主循环登记（直接调用场景），在此登记 `_inflight[current_task]`（`:448-451`）。
+2. 取域名熔断器；`allow_request()` 为假时记录日志并 `return`。判断位于 `try` 内，`finally` 仍会释放资源（`:456-461`）。
+3. `response = await self.downloader.fetch(request)`（`:463`）。
+4. **只调用一次** `_invoke_callback(request, response)`（`:333-362`）：
    - async generator 回调：`async for` 消费；
-   - 普通协程回调：`await` 后按 `None` / 单个 `Request|Result` / 同步可迭代 / 异步可迭代归一化（`:348-373`）；
+   - 普通协程回调：`await` 后按 `None` / 单个 `Request|Result` / 同步可迭代 / 异步可迭代归一化（`:364-389`）；
    - 其他返回类型：抛 `TypeError`，走 errback。
-6. 分发（`:375-385`）：`Request` → `Scheduler.schedule_request`；`Result` → `item_scraped`；其他类型 → `TypeError`。
-7. 成功：`circuit.record_success()`、`successful_requests+1`、发 `request_finished(success=True)`（`:413-416`）。
-8. 异常：`circuit.record_failure()`（每个逻辑请求只记一次）、`failed_requests+1`、调用 errback 一次；errback 自身异常只记录日志（`:418-432`）。
-9. `finally`：`_processing.discard(url)`；`scheduler.request_completed(request)` 的 `KeyError` 被捕获并告警；更新平均耗时（`:433-446`）。
+5. 分发（`:418-428`）：`Request` → `_schedule`；`Result` → `item_scraped`；其他类型 → `TypeError`。
+6. 成功：`circuit.record_success()`、`successful_requests+1`、发 `request_finished(success=True)`（`:466-468`）。
+7. `Exception`：`circuit.record_failure()`（每个逻辑请求只记一次）、`failed_requests+1`、调用 errback 一次；errback 自身异常只记录日志（`:470-485`）。`CancelledError` 是 `BaseException`，不计失败、不发 `request_finished`。
+8. `finally`：仅当本方法自行登记时 pop `_inflight`（主循环登记的任务由 `_on_task_done` 清理）；`slot.release()` 幂等归还调度资源；更新平均耗时（`:487-501`）。
+
+### 3.4.1 关闭与终态
+
+`Spider.close`（`webants/spider.py:584-633`）是幂等、可在未 `start()` 时调用的终态操作：
+
+1. 置 `_running = False`，主循环不再创建新任务；`finish_time` 仅在未设置时写入。
+2. 快照 `list(self._inflight)`，逐个 `cancel()`，`await asyncio.gather(*snapshot, return_exceptions=True)`；被取消任务的 `finally` 归还 slot，`_on_task_done` 清登记并计 `cancelled_requests`。
+3. `scheduler.discard_pending()`：排队请求逐条 `slot.release()`，累加 `discarded_on_close`。
+4. `await downloader.close()`（`aclose()` 幂等）。
+5. `spider_stopped` **恰好一次**；随后置 `_closed = True`。
+
+不变量（可用 `get_stats()` 与 `scheduler.audit()` 断言）：`_inflight` 为空、`request_queue.qsize() == 0`、`audit()["idle"]` 为真且 `mismatch_count == 0`、`downloader.client.is_closed` 为真、`closed is True`；关闭后 `_schedule()` 返回 `None`，`start()` 抛 `RuntimeError`。`async with Spider(...)` 只保证退出时 close，不会自动 start。契约见 [ADR-0003](../adr/0003-shutdown-cancellation-and-loop-quiescence.md)。
 
 `Downloader.fetch`（`webants/downloader.py:335-432`）：
 
@@ -95,7 +114,7 @@
   - 传输异常耗尽 → `RequestError(code="FETCH_FAILED")`；
   - 可重试状态耗尽 → `RequestError(code="RETRY_EXHAUSTED")`，metadata 含 `status_code/headers/url/attempts`（`:381-414`）。
 - 重试期间占用当前域名并发槽位；这是 v1 的显式取舍，未来若需“退避让出槽位”，应引入延迟队列而不是把重试散落到 Spider。
-- worker 模式（`start_worker`）只是兼容适配器：调用 `fetch`，成功响应入 `response_queue`，失败记录日志；Spider 不走该路径（`:435-457`）。
+- worker 模式（`start_worker`）只是兼容适配器：调用 `fetch`，成功响应入 `response_queue`，失败记录日志；Spider 不走该路径（`:435-455`）。`start_downloader` 在 `try/finally` 中只取消并 `gather` 自己创建的 worker，不再触碰事件循环里的其他任务（`:457-472`，P1-20 已关闭）。
 
 > P1-03、P1-19、P2-01 均已随本阶段关闭。重试不再使用 `max_retries - retries` 作为指数，也不再向 Downloader 私有队列投递。
 
@@ -155,7 +174,9 @@
 |------|------|----------|
 | `seen_urls` | `Scheduler` 实例 | 进程内，无上限 |
 | `domain_stats` / `domain_semaphores` | `Scheduler` 实例 | 每域名一份，不清理 |
-| `_processing` | `Spider` 实例 | 进程内，当前处理中的 URL |
+| `_inflight` | `Spider` 实例 | task → Request；运行中非空，`close()` 后为空 |
+| `_last_activity` / `idle_grace` / `_closed` | `Spider` 实例 | 收敛时钟、静默窗口与终态标志 |
+| `_outstanding` / `_reserved_urls` | `Scheduler` 实例 | 未归还的 slot 与正在调度中的 URL；`close()` 后应为空 |
 | `retry_requests` / `total_retries` / `total_attempts` | `Downloader.stats` | 进程内计数，不再保存 URL 集合 |
 | `_cached_parse` LRU | Parser 类级缓存 | 最多 1000 条，实例被 key 持有 |
 | `_css_cache` / `_xpath_cache` | Parser 实例 dict | 无上限 |
@@ -165,12 +186,14 @@
 
 | 场景 | 实际行为 | 证据 |
 |------|----------|------|
-| 队列为空但仍有处理中任务 | `get_request()` 阻塞等待，主循环无法继续 | `webants/spider.py:462-470`、`webants/scheduler.py:170-181` |
-| 队列为空且无处理中任务 | 本应 `break`，但 `get_request()` 先阻塞，永远到不了判断 | `webants/spider.py:463-469` |
+| 队列为空但仍有处理中任务 | `get_request()` 轮询返回 `None`，`_inflight` 非空，主循环继续等待 | `webants/spider.py:549-561`、`webants/scheduler.py:367-390` |
+| 队列为空且无处理中任务 | 静默 `idle_grace` 后 `break`；`idle_grace=0` 时立即退出 | `webants/spider.py:551-561` |
+| 主循环运行中调用 `close()` | 停止建新任务、取消在飞、排空队列、关 client；`start()` 的 `finally` 再次 close 为空操作 | `webants/spider.py:584-633` |
+| 关闭后再 `start()` | 抛 `RuntimeError("Spider has been closed...")` | `webants/spider.py:531-532` |
 | 回调是 async generator | 正常执行；`Request` 构造期接受 | `webants/libs/request.py:167-202`、`webants/spider.py:317-346` |
 | 回调是普通协程 | 正常执行；返回值由 Spider 归一化 | `webants/spider.py:348-373` |
 | 下载失败（HTTPError/可重试状态耗尽） | `fetch` 抛 `RequestError`，`process_request` 走 errback；不再构造 600 | `webants/downloader.py:381-414` |
-| 请求未入队就调用 `process_request` | `finally` 捕获 `request_completed` 的 `KeyError` 并告警，不再掩盖原始异常 | `webants/spider.py:433-441` |
+| 请求未入队就调用 `process_request` | 不接触调度资源，`slot=None`，`finally` 无需释放；`_inflight` 自行登记/清理 | `webants/spider.py:430-501` |
 | 队列满 | `PriorityQueue.put` 挂起；持有域名信号量 | `webants/scheduler.py:118,163` |
 | 文档为空字符串 | `fromstring` 抛错并包装为 `ParserError` | `webants/parser.py:90-105` |
 | 链接过滤 `normalize=False` | `urlparse(Link)` → `AttributeError: 'Link' object has no attribute 'decode'` | 实测；`webants/libs/extractor.py:307-313,889-895` |

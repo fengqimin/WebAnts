@@ -10,31 +10,34 @@
 stateDiagram-v2
     [*] --> Created: Spider 构造
     Created --> Running: await start
+    Created --> Closed: await close（幂等）
     Running --> Running: create_task process_request
-    Running --> Closed: close
-    Closed --> [*]
+    Running --> Closed: close / 主循环收敛后的 finally
+    Closed --> [*]: start 抛 RuntimeError
 ```
 
 | 阶段 | 方法 | 行为 | 证据 |
 |------|------|------|------|
-| 构造 | `Spider.__init__(**kwargs)` | 实例化 Scheduler/Downloader/Parser，初始化统计、熔断表、同步 Signal | `webants/spider.py:141-216` |
-| 启动 | `await Spider.start()` | 生成初始请求并入队，进入主循环 | `webants/spider.py:448-490` |
-| 处理 | `await Spider.process_request(request)` | 熔断检查、下载、`_invoke_callback` 归一化并分发、发信号、`finally` 释放资源 | `webants/spider.py:387-446` |
-| 关闭 | `await Spider.close()` | 关闭 downloader、记录时长、发 `spider_stopped` | `webants/spider.py:479-495` |
-| 观测 | `Spider.get_stats()` | 合并 spider/scheduler/parser/downloader 统计 | `webants/spider.py:497-513` |
+| 构造 | `Spider.__init__(**kwargs)` | 实例化 Scheduler/Downloader/Parser，初始化统计、熔断表、同步 Signal、关闭状态与 `_close_lock` | `webants/spider.py:143-233` |
+| 启动 | `await Spider.start()` | 生成初始请求并入队，进入轮询主循环；关闭后调用抛 `RuntimeError` | `webants/spider.py:524-582` |
+| 处理 | `await Spider.process_request(request, slot=...)` | 熔断检查、下载、`_invoke_callback` 归一化并分发、发信号、`finally` 中 `slot.release()` 并清登记 | `webants/spider.py:430-501` |
+| 关闭 | `await Spider.close()` | 幂等、与 `_running` 解耦：取消在飞 → 排空队列 → 关 downloader → 发 `spider_stopped`（恰好一次）→ 置 `_closed` | `webants/spider.py:584-633` |
+| 上下文 | `async with Spider(...) as spider:` | `__aenter__` 不自动 start；`__aexit__` 调用一次 `close()` | `webants/spider.py:635-641` |
+| 观测 | `Spider.get_stats()` | 合并 spider/scheduler/parser/downloader 统计，含 `closed`、`inflight_count` | `webants/spider.py:643-652` |
 
 构造参数：
 
 | 参数 | 默认 | 作用 | 落点 |
 |------|------|------|------|
-| `concurrent_requests` | `10` | 同时传给 scheduler 的域名并发与 downloader 的并发 | `webants/spider.py:144,168-175` |
-| `request_timeout` | `30` | 下载超时（秒） | `webants/spider.py:145,174` |
-| `retry_times` | `3` | 写入 `Request.retries` | `webants/spider.py:146,281` |
-| `retry_delay` | `1.0` | 只写入 `self.settings`，未传给 Downloader | `webants/spider.py:147,184` |
-| `log_level` | `logging.INFO` | 各组件日志级别 | `webants/spider.py:148,165-176` |
-| `failure_threshold` | `5` | 熔断阈值 | `webants/spider.py:149,211` |
-| `recovery_timeout` | `60.0` | 熔断恢复时间 | `webants/spider.py:150,212` |
-| `**kwargs` | — | 原样并入 `self.settings` | `webants/spider.py:179-186` |
+| `concurrent_requests` | `10` | 同时传给 scheduler 的域名并发与 downloader 的并发 | `webants/spider.py:146,174-181` |
+| `request_timeout` | `30` | 下载超时（秒） | `webants/spider.py:147,177-180` |
+| `retry_times` | `3` | 写入 `Request.retries` | `webants/spider.py:148,298` |
+| `retry_delay` | `1.0` | 只写入 `self.settings`，未传给 Downloader | `webants/spider.py:149,185-192` |
+| `log_level` | `logging.INFO` | 各组件日志级别 | `webants/spider.py:150,171-182` |
+| `failure_threshold` | `5` | 熔断阈值 | `webants/spider.py:151,228` |
+| `recovery_timeout` | `60.0` | 熔断恢复时间 | `webants/spider.py:152,229` |
+| `idle_grace` | `0.5` | 主循环在“队列空 + 无在飞任务”后继续等待的静默窗口（秒）；`0` 表示立即退出，供测试使用 | `webants/spider.py:153,202` |
+| `**kwargs` | — | 原样并入 `self.settings` | `webants/spider.py:185-192` |
 
 > `retry_delay` 没有传给 `Downloader`（后者自己从 `kwargs.get("retry_delay", 1)` 取值），二者默认值相同但修改 `Spider(retry_delay=...)` 不会影响下载器重试间隔。
 
@@ -55,10 +58,12 @@ stateDiagram-v2
 
 | 方法 | 签名 | 返回值 | 说明 | 证据 |
 |------|------|--------|------|------|
-| `schedule_request` | `async (request: Request) -> bool` | `True` 入队，`False` 被过滤/超限 | 去重、域名状态、信号量、自适应延迟、`put` | `webants/scheduler.py:78-168` |
-| `get_request` | `async () -> Optional[Request]` | 下一个请求 | 阻塞等待；取出后可选全局延迟 | `webants/scheduler.py:170-181` |
-| `request_completed` | `(request) -> None` | — | 减 active、释放域名信号量 | `webants/scheduler.py:183-196` |
-| `get_stats` | `() -> dict` | 统计快照 | 含 `queue_size`、`domain_stats` | `webants/scheduler.py:198-208` |
+| `schedule_request` | `async (request: Request) -> ScheduleResult` | `SCHEDULED` 时带 `slot`；否则带 `reason` | 去重、域名状态、信号量、自适应延迟、`put_nowait`；拒绝不泄漏额度 | `webants/scheduler.py:265-365` |
+| `get_request` | `async () -> Optional[ScheduleSlot]` | 下一个 slot；空队列轮询后返回 `None` | 非阻塞；调用方持有 slot 并负责释放 | `webants/scheduler.py:367-390` |
+| `discard_pending` | `() -> int` | 丢弃条数 | 关闭时逐条 `slot.release()`，累加 `discarded_on_close` | `webants/scheduler.py:392-413` |
+| `request_completed` | `(request) -> None` | — | **已弃用**：按 URL 释放不可区分同 URL 并发请求，仅保留兼容；不配对时计 `slot_mismatches` | `webants/scheduler.py:415-445` |
+| `audit` | `() -> dict` | 对账快照 | 含 `idle`、`balanced`、`mismatch_count`、`outstanding` | `webants/scheduler.py:447-490` |
+| `get_stats` | `() -> dict` | 统计快照 | 含 `queue_size`、`domain_stats`、`discarded_on_close` | `webants/scheduler.py:492-510` |
 
 构造参数：`max_requests`（0 不限）、`request_delay`、`domain_delay`、`max_domain_concurrent`、`max_queue_size`（默认 10000）、`log_level`（`webants/scheduler.py:24-43`）。注意 `Spider` 只传了 `max_domain_concurrent` 和 `log_level`，其余用默认值（`webants/spider.py:168-170`）。
 
@@ -69,8 +74,8 @@ stateDiagram-v2
 | `fetch` | `async (request) -> httpx.Response` | 非可重试响应；否则抛 `RequestError(FETCH_FAILED/RETRY_EXHAUSTED)` | 主链路使用；内部完成重试、退避、`Retry-After`；**不调用回调** | `webants/downloader.py:335-432` |
 | `fetch_retry` | `async (request) -> httpx.Response` | 同 `fetch` | 兼容别名，仅保留一个版本 | `webants/downloader.py:431-433` |
 | `start_worker` | `async () -> None` | — | worker 兼容适配器：`fetch` 成功入 `response_queue`，`RequestError` 记日志 | `webants/downloader.py:435-455` |
-| `start_downloader` | `async (many: int = None) -> None` | — | 启动 N 个 worker，`join` 后取消所有任务 | `webants/downloader.py:457-472` |
-| `close` | `async () -> None` | — | `client.aclose()` | `webants/downloader.py:474-477` |
+| `start_downloader` | `async (many: int = None) -> None` | — | 启动 N 个 worker，`join` 后只取消并回收**自己创建**的 worker（`try/finally`） | `webants/downloader.py:457-472` |
+| `close` | `async () -> None` | — | `client.aclose()`；重复调用安全 | `webants/downloader.py:475-478` |
 | `get_stats` | `() -> dict` | 统计副本 | 含 `total_requests/total_attempts/total_retries/retry_requests` 等 | `webants/downloader.py:479-481` |
 
 构造参数（关键字）：`concurrency`、`log_level`、`loop`，以及 `kwargs` 中的 `delay`、`timeout`、`retry_delay`、`retry_backoff_factor`、`retry_max_delay`、`retry_jitter`、`retry_status_codes`、`headers`、`cookies`、`encoding`、`limits`、`proxies`、`follow_redirects`、`http2`（`webants/downloader.py:100-171`）。
@@ -146,6 +151,7 @@ stateDiagram-v2
 | `TypeError` | 回调/errback 不是可调用/协程函数、`cb_kwargs` 非法 | 否 | 构造 `Request` 期失败（`webants/libs/request.py:167-223`） |
 | `httpx.HTTPError` | 网络/超时 | `_fetch` 抛出、`fetch` 捕获 | 未耗尽则退避重试；耗尽抛 `RequestError(FETCH_FAILED)` |
 | `RequestError` | 重试耗尽 / 传输失败 | 否 | `Spider.process_request` 捕获，走 errback 一次；`code` 区分 `FETCH_FAILED`/`RETRY_EXHAUSTED` |
+| `RuntimeError` | 已关闭的 Spider 再 `start()` | 否 | 关闭是终态；需重新实例化（`webants/spider.py:531-532`） |
 | 回调抛异常 | `Spider._invoke_callback` 内 | 不捕获 | 冒泡到 `process_request`，走 errback |
 | `ParserError` | 解析失败、超限、编码失败 | 否 | 抛给调用方（`webants/parser.py:98-105`） |
 | `CircuitBreakerError` | 中间件熔断打开 | 否 | 中间件链未接入，实际不触发 |
@@ -154,7 +160,9 @@ stateDiagram-v2
 
 ## 2.11 后台任务与并发语义
 
-- `Spider.start` 用 `asyncio.create_task(self.process_request(request))` 启动任务，但**不保存引用、不 await**（`webants/spider.py:472`）；`close()` 只关闭 downloader，不等待这些任务（`:479-495`）。
-- `Downloader.start_downloader` 在 `request_queue.join()` 后会取消**事件循环内所有其他任务**（`webants/downloader.py:402-405`），这会误伤同进程内的其他协程。
+- `Spider.start` 用 `asyncio.create_task(self.process_request(request, slot=slot))` 启动任务，并在让出控制权**之前**登记到 `_inflight`（task → Request）并挂 `_on_task_done`；任务结束回调清理登记、消费异常并按需计数（`webants/spider.py:503-522,573-577`）。
+- 主循环按 `Scheduler.poll_interval` 轮询：`get_request()` 返回 `None` 时，只有「无在飞任务」且「静默 ≥ `idle_grace`」才退出（`webants/spider.py:549-561`）。
+- `close()` 会取消在飞任务（库只取消自己创建的任务）、`scheduler.discard_pending()` 归还排队凭据、关闭 client；重复/并发调用安全，且关闭后不可重启（[ADR-0003](../adr/0003-shutdown-cancellation-and-loop-quiescence.md)）。
+- `Downloader.start_downloader` 只取消本方法创建的 worker（`try/finally`），不再调用 `asyncio.all_tasks()`（`webants/downloader.py:457-472`）。
 - `Scheduler.schedule_request` 在入队前 `await asyncio.sleep(effective_delay)`（`webants/scheduler.py:145-150`），因此调度是串行的；`PriorityQueue.put` 在队列满时会一直等待（`:163`）。
 - 共享可变状态包括 `seen_urls`、`domain_stats`、`domain_semaphores`、`Parser._cached_parse` 的全局 LRU、`ExtractorFactory.extractors` 类字典；均无锁，依赖单事件循环串行执行。

@@ -24,13 +24,13 @@
 
 ## 8.2 验证环境与证据
 
-所有结论基于 `master @ 23f8051`，Python 3.12.11，`uv 0.13.6`。下表中的数量为 **2026-11-04 复测值**（第 1 阶段完成后）。
+所有结论基于 `master @ 23f8051`，Python 3.12.11，`uv 0.13.6`。下表中的数量为 **最近一次复测值（2026-11-05，ADR-0003 实施后）**。
 
 | 验证项 | 命令 / 脚本 | 实际结果 |
 |--------|-------------|----------|
-| 测试套件 | `uv run pytest -q` | `1 failed, 97 passed`；失败仍为 `tests/test_item.py::test_invalid_html`（P1-12）；新增 `test_request.py`、`test_spider.py`，`test_downloader.py` 已全部离线化 |
+| 测试套件 | `uv run pytest -q` | `1 failed, 123 passed`；失败仍为 `tests/test_item.py::test_invalid_html`（P1-12） |
 | Lint | `uv run ruff check .` | `Found 17 errors`，全部 `F401` |
-| 导入排序 | `uv run isort --check .` | **11 个文件不合格，2 个文件跳过**（原版记 7 个，已更新） |
+| 导入排序 | `uv run isort --check .` / `uv run python -m isort --check-only .` | CLI 入口报 `Failed to canonicalize script path`；改用模块方式后 **17 个文件不合格，2 个跳过** |
 | 格式检查 | `uv run black --check .` | `Failed to canonicalize script path`，无法运行；且 `dev` 依赖组未声明 black |
 | 配置合并 | 构造 `Config()` 后 `_merge_config({"downloader": {"concurrent_requests": 42}})` | 顶层出现 `concurrent_requests`，`downloader.concurrent_requests` 仍为 10 |
 | 链接过滤 | `FilteringLinkExtractor(base_url=..., normalize=False).extract('<a href="/p">x</a>')` | `AttributeError: 'Link' object has no attribute 'decode'` |
@@ -207,7 +207,7 @@ else:
 
 ## 8.6 P1 详解
 
-> **已关闭：P1-03、P1-13、P1-14、P1-18、P1-19。** 以下保留原始分析与修复建议；当前实现以 8.13 与 [03 主链路](03-crawler.md) 为准。
+> **已关闭：P1-01、P1-02、P1-03、P1-04、P1-13、P1-14、P1-18、P1-19、P1-20。** 以下保留原始分析与修复建议；当前实现以 8.13 与 [03 主链路](03-crawler.md) 为准。
 
 ### P1-01 未入队请求在 finally 中触发 KeyError
 
@@ -258,6 +258,8 @@ except asyncio.TimeoutError:
 if self._tasks:
     await asyncio.gather(*self._tasks, return_exceptions=True)
 ```
+
+**落地（ADR-0003，2026-11-05）**：未采用 `wait_for(get_request())`（取消 `Queue.get()` 有丢件风险），而是让 `get_request()` 按 `poll_interval` 轮询返回 `None`；退出条件为「无在飞任务 ∧ 静默 ≥ `idle_grace`（默认 0.5s）」。任务登记复用 `_inflight`（task → Request），由 `_on_task_done` 清理并消费逃逸异常；`close()` 取消在飞、排空队列并保证幂等。回归用例见 `tests/test_spider.py` 的 `test_close_*`、`test_task_escape_is_counted_and_consumed`、`test_idle_grace_controls_exit_delay`。
 
 ### P1-03 fetch 不重试
 
@@ -476,6 +478,8 @@ for task in asyncio.all_tasks():
 
 ## 8.7 P2 详解
 
+> **已关闭：P2-20、P2-22、P2-23。** P2-20 随 `_inflight` 改为 task 键、P2-22 随 `request_scheduled` 移入 `_schedule`、P2-23 随 ADR-0003 的 `close()` 状态机一并修复。
+
 ### 8.7.1 原结论修正
 
 #### P2-02 优先级语义：三套规则并存（原结论已修正）
@@ -593,7 +597,7 @@ await self.request_queue.put((request.priority, request))
 |------|------|------|------|
 | 0 | 写 [ADR-0001](../adr/0001-callback-contract-and-retry-ownership.md)：确定回调契约、重试归属、失败信号（已完成 2026-11-04） | 避免后续反复改 | 文档评审通过，P0-01 方案冻结 |
 | 1 | P0-01、P1-03、P1-13、P1-14、P1-19 + `tests/test_spider.py`（已完成 2026-11-04） | 同一问题簇，必须一起改 | MockTransport 端到端：初始页 → 解析 2 个链接 → 抓取子页 → 产出 Result |
-| 2 | P1-01、P1-02、P1-04、P1-18、P1-20、P2-20、P2-23 | 生命周期与资源泄漏 | 异常、取消、熔断三种场景下计数恢复 |
+| 2 | P1-01、P1-02、P1-04、P1-18、P1-20、P2-20、P2-23（已完成 2026-11-05） | 生命周期与资源泄漏 | 异常、取消、熔断三种场景下计数恢复；ADR-0002 落地槽位所有权，ADR-0003 落地关闭/取消/收敛契约 |
 | 3 | P1-05、P1-06、P1-07、P1-08、P1-15 ~ P1-17、P2-15 ~ P2-17 | 数据正确性 | 提取器矩阵、Config 合并、缓存统计、信号排序全部通过 |
 | 4 | P1-09、P1-10、P1-11、P2-19 | 可选层接入与关闭语义 | flush 后条数一致；缓存命中语义明确；组装示例可运行 |
 | 5 | 其余 P2 + CI + 仓库卫生 | 收口 | `ruff`、`isort`、`pytest` 在 CI 全绿 |
@@ -614,23 +618,28 @@ await self.request_queue.put((request.priority, request))
 
 ## 8.13 实施状态
 
-> 更新于 2026-11-04。实现依据 [ADR-0001](../adr/0001-callback-contract-and-retry-ownership.md)（Accepted）。
+> 更新于 2026-11-05。实现依据 [ADR-0001](../adr/0001-callback-contract-and-retry-ownership.md)（Accepted）、[ADR-0002](../adr/0002-schedule-slot-ownership-and-request-lifecycle.md)（Accepted，L1–L4）与 [ADR-0003](../adr/0003-shutdown-cancellation-and-loop-quiescence.md)（Accepted，L5–L8）。
 
 | 条目 | 状态 | 证据 / 说明 |
 |------|------|-------------|
 | P0-01 | **Closed** | `Downloader.fetch` 不再调用回调；Spider 单点调用并归一化 async generator/coroutine；`Request` 双类型校验。`tests/test_request.py`、`tests/test_spider.py` |
+| P1-01 | **Closed** | 调度资源以 `ScheduleSlot` 为凭据，由 `process_request` 的 `finally` 幂等释放；未入队的直接调用不接触调度资源。`test_cancelled_request_releases_its_slot`、`test_double_slot_release_is_idempotent` |
+| P1-02 | **Closed** | 主循环按 `poll_interval` 轮询，退出需「队列空 ∧ 无在飞 ∧ 静默 ≥ `idle_grace`」；任务登记在 `_inflight`，`_on_task_done` 消费异常。`test_close_cancels_inflight_and_drains_queue`、`test_task_escape_is_counted_and_consumed`、`test_idle_grace_controls_exit_delay` |
 | P1-03 | **Closed** | 重试内联到 `Downloader.fetch`；`fetch_retry` 仅兼容别名。`tests/test_downloader.py` |
+| P1-04 | **Closed** | 入队路径无跨挂起点：先占位去重，`put_nowait` + 队列满回滚，取消时归还凭据。`test_queue_full_returns_reason_without_leaking`、`test_cancel_while_waiting_for_permit_keeps_accounting_balanced` |
 | P1-13 | **Closed** | `_fetch` 透传 body（dict→json）、cookies（显式 Cookie 头）、referer；测试 `test_body_cookies_and_referer_are_sent` |
 | P1-14 | **Closed** | 删除 600 哨兵；失败抛 `RequestError(FETCH_FAILED/RETRY_EXHAUSTED)`；测试 `test_downloader_failure_reaches_errback` |
 | P1-18 | **Closed** | 熔断判断移入 `try`，`finally` 释放；测试 `test_circuit_blocked_request_releases_resources` |
 | P1-19 | **Closed** | 删除 `_retry_request` 与跨队列投递；重试在 `fetch` 内完成 |
+| P1-20 | **Closed** | `start_downloader` 只取消自建 worker（`try/finally` + `gather`）。`test_start_downloader_does_not_cancel_host_tasks` |
 | P2-01 | **Closed** | 移除 403/404/420；新增 425；退避按已重试次数计算；支持 `Retry-After` |
-| P1-01 | 部分缓解 | `_processing.discard` + `request_completed` 的 `KeyError` 容错，不再掩盖原始异常；调度器的完整入队状态跟踪留到第 2 阶段 |
-| P1-20 | 部分缓解 | `start_worker` 改为调用 `fetch` 并处理 `RequestError`；`start_downloader` 取消全部任务的问题仍待第 2 阶段 |
-| P1-02 / P1-04 / P1-05 / P1-06 / P1-07 / P1-08 / P1-09 / P1-10 / P1-11 / P1-12 / P1-15 / P1-16 / P1-17 | Open | 按 8.11 第 2–5 阶段推进 |
-| P2-02 ~ P2-23（除 P2-01） | Open | 按 8.11 第 5 阶段收口 |
+| P2-20 | **Closed** | `_inflight` 以 task 为键，同 URL 并发互不覆盖。`test_inflight_keeps_same_url_requests_distinct` |
+| P2-22 | **Closed** | `request_scheduled` 仅在真正入队后由 `_schedule` 发送。`test_scheduled_signal_fires_only_for_queued_requests` |
+| P2-23 | **Closed** | `close()` 与 `_running` 解耦、幂等、并发安全，未启动也释放 client。`test_close_before_start_releases_resources`、`test_close_is_idempotent_and_concurrent_safe` |
+| P1-05 / P1-06 / P1-07 / P1-08 / P1-09 / P1-10 / P1-11 / P1-12 / P1-15 / P1-16 / P1-17 | Open | 按 8.11 第 3–5 阶段推进 |
+| P2-02 ~ P2-19、P2-21 | Open | 按 8.11 第 3/5 阶段收口 |
 
-当前测试基线：`uv run pytest -q` → `1 failed, 97 passed`。唯一失败为 P1-12 的 `tests/test_item.py::test_invalid_html`，与本阶段无关；`tests/test_spider.py`、`tests/test_downloader.py`、`tests/test_request.py` 全部通过且不访问网络。
+当前测试基线：`uv run pytest -q` → `1 failed, 123 passed`。唯一失败为 P1-12 的 `tests/test_item.py::test_invalid_html`，与本阶段无关；`tests/test_spider.py`、`tests/test_downloader.py`、`tests/test_request.py`、`tests/test_scheduler.py` 全部通过且不访问网络。`ruff check` 仍为 17 个 `F401`；`isort` 需用 `uv run python -m isort`（CLI 入口报 `Failed to canonicalize script path`）。
 
 ## 附录 A 原版勘误表
 
