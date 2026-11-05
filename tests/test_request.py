@@ -17,6 +17,32 @@ async def async_generator_errback(error, request):
     yield None
 
 
+def test_headers_are_empty_by_default():
+    request = Request("http://example.com", callback=coroutine_callback)
+    assert request.headers == {}
+
+
+def test_explicit_headers_are_preserved():
+    request = Request(
+        "http://example.com",
+        callback=coroutine_callback,
+        headers={"User-Agent": "custom", "X-Test": "1"},
+    )
+    assert request.headers == {"User-Agent": "custom", "X-Test": "1"}
+
+
+def test_priority_ordering_is_strict_weak_order():
+    high = Request("http://example.com/1", callback=coroutine_callback, priority=1)
+    low = Request("http://example.com/2", callback=coroutine_callback, priority=5)
+    same = Request("http://example.com/3", callback=coroutine_callback, priority=1)
+
+    assert high < low
+    assert not low < high
+    assert not high < high
+    assert not high < same
+    assert not same < high
+
+
 def test_async_generator_callback_is_accepted():
     request = Request("http://example.com", callback=async_generator_callback)
     assert request.callback is async_generator_callback

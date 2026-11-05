@@ -5,7 +5,10 @@ This module defines classes for handling scraped data with validation and signal
 
 import time
 from typing import Any, Dict, Optional, Union
-from pydantic import BaseModel, ConfigDict, field_validator, Field as PydanticField
+
+from pydantic import BaseModel, ConfigDict
+from pydantic import Field as PydanticField
+from pydantic import field_validator
 
 
 class Field(BaseModel):
@@ -73,7 +76,7 @@ class Result:
         url: Optional[str] = None,
         mediatype: Optional[str] = None,
         title: Optional[str] = None,
-        crawl_time: float = 0.0,
+        crawl_time: Optional[float] = None,
     ):
         """Initialize Result instance.
 
@@ -84,7 +87,8 @@ class Result:
             url: Source URL where data was extracted from
             mediatype: Content type of the source
             title: Title of the source page/document
-            crawl_time: Time taken to crawl (default: current time)
+            crawl_time: Time taken to crawl; ``None`` uses the current time,
+                while ``0`` is preserved as an explicit value
         """
         self.spider = spider
         self.fields: Dict[str, Field] = {}
@@ -104,7 +108,7 @@ class Result:
         self.url = url
         self.mediatype = mediatype
         self.title = title
-        self.crawl_time = crawl_time or time.time()
+        self.crawl_time = time.time() if crawl_time is None else crawl_time
 
     def __repr__(self) -> str:
         """String representation of Result.
@@ -126,9 +130,7 @@ class Result:
         """
         try:
             if not isinstance(field, Field):
-                field = Field(
-                    value=field, source=self.url, extractor=f"{self.spider}.parse"
-                )
+                field = Field(value=field, source=self.url, extractor=f"{self.spider}.parse")
             self.fields[name] = field
         except ValueError as e:
             self._errors.append(f"Invalid field '{name}': {str(e)}")
@@ -188,9 +190,7 @@ class Result:
         """
         return {
             "spider": self.spider,
-            "fields": {
-                name: field.model_dump() for name, field in self.fields.items()
-            },
+            "fields": {name: field.model_dump() for name, field in self.fields.items()},
             "status": self.status_code,
             "url": self.url,
             "mediatype": self.mediatype,

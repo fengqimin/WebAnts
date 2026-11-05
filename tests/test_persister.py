@@ -17,6 +17,7 @@ from webants.libs.persister import (
     PersisterManager,
     SqlitePersister,
 )
+from webants.utils import misc
 
 
 def _row(i: int) -> dict:
@@ -201,13 +202,13 @@ async def test_json_writes_one_compact_record_per_line(tmp_path):
 async def test_json_append_does_not_reread_existing_file(tmp_path, monkeypatch):
     path = tmp_path / "results.json"
     reads = []
-    real_load = json.load
+    real_load = misc.loads
 
-    def counting_load(file):
-        reads.append(file)
-        return real_load(file)
+    def counting_load(value, **kwargs):
+        reads.append(value)
+        return real_load(value, **kwargs)
 
-    monkeypatch.setattr("webants.libs.persister.json.load", counting_load)
+    monkeypatch.setattr("webants.libs.persister.misc.loads", counting_load)
     persister = JsonPersister(path, batch_size=1)
 
     for i in range(3):
@@ -325,3 +326,26 @@ async def test_json_loads_legacy_array_before_migration(tmp_path):
     data = await JsonPersister(path).load()
 
     assert data == [{"i": 0}, {"i": 1}]
+
+
+@pytest.mark.parametrize(
+    "bad_name",
+    ["", "1abc", "bad name", "x; DROP TABLE y", "a" * 65, "中文"],
+)
+def test_sqlite_rejects_invalid_table_name(tmp_path, bad_name):
+    with pytest.raises(ValueError, match="table_name"):
+        SqlitePersister(tmp_path / "invalid.db", table_name=bad_name)
+
+
+async def test_sqlite_accepts_valid_table_name(tmp_path):
+    persister = SqlitePersister(tmp_path / "valid.db", table_name="results_2026")
+    await persister.save(_row(1))
+    await persister.close()
+
+
+async def test_json_roundtrip_preserves_non_ascii(tmp_path):
+    persister = JsonPersister(tmp_path / "cn.json", batch_size=10)
+    record = {"text": "中文", "emoji": "🚀"}
+    assert await persister.save(record) is True
+    assert await persister.flush() == 1
+    assert await persister.load() == [record]

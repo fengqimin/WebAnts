@@ -195,9 +195,7 @@ def extract_links(
         List of Link objects
     """
     if base_url:
-        assert isinstance(base_url, str), (
-            f"Expected str, got {base_url.__class__.__name__}"
-        )
+        assert isinstance(base_url, str), f"Expected str, got {base_url.__class__.__name__}"
         assert urlparse(base_url).scheme, f"Expected absolute URL, got {base_url}"
 
     results = []
@@ -208,15 +206,13 @@ def extract_links(
         tags=tags,
         attr=attr,
     ):
-        if link := Link(
-            url=(
-                urljoin(base_url, element.attrib.get(attr))
-                if base_url
-                else element.attrib.get(attr)
-            ),
-            unique=unique,
-        ):
-            results.append(link)
+        raw_url = element.attrib.get(attr)
+        if not raw_url:
+            continue
+        url = urljoin(base_url, raw_url) if base_url else raw_url
+        if not url:
+            continue
+        results.append(Link(url=url, unique=unique))
     return results
 
 
@@ -398,9 +394,10 @@ def extract_and_filter_links(
         links.append(link)
 
     if unique:
-        return list(set(links))
-    else:
-        return links
+        # ``Link`` keeps identity equality, so deduplicate by URL while
+        # preserving the first occurrence and its order.
+        return list({link.url: link for link in links}.values())
+    return links
 
 
 def extract_text(
@@ -463,9 +460,7 @@ class ExtractorFactory:
     """Extractor factory class"""
 
     __slots__ = ()
-    extractors: dict[str, "BaseExtractor"] = (
-        dict()
-    )  # Record specific classes through metaclass
+    extractors: dict[str, "BaseExtractor"] = dict()  # Record specific classes through metaclass
     _instance = None
 
     def __new__(cls, *args, **kwargs):
@@ -609,9 +604,7 @@ class _LxmlElementExtractor(BaseExtractor):
             results = self.xpath_expr(html)
         else:
             if self.attr:
-                results = [
-                    el for el in html.iter(*self.tags) if self.attr in el.attrib.keys()
-                ]
+                results = [el for el in html.iter(*self.tags) if self.attr in el.attrib.keys()]
             else:
                 results = [el for el in html.iter(*self.tags)]
 
@@ -678,9 +671,7 @@ class AttribExtractor(_LxmlElementExtractor):
         **kwargs,
     ):
         assert attr, f"attr can't be {attr}."
-        super().__init__(
-            attr=attr, selector=selector, xpath=xpath, tags=tags, many=many, **kwargs
-        )
+        super().__init__(attr=attr, selector=selector, xpath=xpath, tags=tags, many=many, **kwargs)
         #
         # self.selector = selector
         # self.xpath = xpath
@@ -696,10 +687,9 @@ class AttribExtractor(_LxmlElementExtractor):
         :return:
         """
 
-        try:
-            return element.attrib.get(self.attr)
-        except AttribExtractor:
+        if not hasattr(element, "attrib"):
             return None
+        return element.attrib.get(self.attr)
 
 
 class LinkExtractor(AttribExtractor):
@@ -722,18 +712,14 @@ class LinkExtractor(AttribExtractor):
         unique: bool = True,
         **kwargs,
     ):
-        super().__init__(
-            selector=selector, xpath=xpath, tags=tags, attr=attr, many=many, **kwargs
-        )
+        super().__init__(selector=selector, xpath=xpath, tags=tags, attr=attr, many=many, **kwargs)
 
         self.base_url = base_url
         if self.base_url:
             assert isinstance(self.base_url, str), (
                 f"Expected str, got {self.base_url.__class__.__name__}"
             )
-            assert urlparse(self.base_url).scheme, (
-                f"Expected absolute URL, got {self.base_url}"
-            )
+            assert urlparse(self.base_url).scheme, f"Expected absolute URL, got {self.base_url}"
         self.unique = unique
 
     def _extract_element(self, element: etree._Element | str) -> Link | None:
@@ -781,9 +767,7 @@ class TextExtractor(_LxmlElementExtractor):
         many: bool = True,
         **kwargs,
     ):
-        super().__init__(
-            attr=attr, selector=selector, xpath=xpath, tags=tags, many=many, **kwargs
-        )
+        super().__init__(attr=attr, selector=selector, xpath=xpath, tags=tags, many=many, **kwargs)
 
         self.iter_text = iter_text
 
@@ -853,9 +837,7 @@ class FilteringLinkExtractor(BaseExtractor):
         self.hosts_deny = [_.lower() for _ in set(args_to_list(hosts_deny))]
 
         self.regexps_allow = [
-            re.compile(_)
-            for _ in set(args_to_list(regexps_allow))
-            if isinstance(_, str)
+            re.compile(_) for _ in set(args_to_list(regexps_allow)) if isinstance(_, str)
         ]
         self.regexps_deny = [
             re.compile(_) for _ in set(args_to_list(regexps_deny)) if isinstance(_, str)

@@ -1,3 +1,4 @@
+import asyncio
 import random
 import time
 from pathlib import Path
@@ -22,7 +23,13 @@ async def async_login_with_playwright(
     password: str,
     css_login_button: str,
     data_path: str | Path | None,
+    sample_url: str | None = None,
 ) -> dict:
+    """Log in with Playwright and return the request headers.
+
+    ``sample_url`` is optional; when omitted no page beyond the login flow is
+    visited and an empty header dict is returned.
+    """
     async with async_playwright() as p:
         browser = await p.chromium.launch()
 
@@ -32,7 +39,7 @@ async def async_login_with_playwright(
         )
         # Open new page
         page = await context.new_page()
-        # Go to http://108.170.5.99/forum.php
+        # Open the login page
         await page.goto(login_url)
         # Click input[name="username"]
         await page.locator(css_username).click()
@@ -47,12 +54,14 @@ async def async_login_with_playwright(
         # Click button:has-text("登錄")
         await page.locator(css_login_button).click()
         # Add delay, otherwise cookies may not be fully obtained
-        time.sleep(5)
+        await asyncio.sleep(5)
         await page.wait_for_url(login_url)
 
-        resp = await page.goto("http://108.170.5.99/thread-8096355-1-1.html", timeout=0)
-
-        headers = await resp.request.all_headers()
+        if sample_url is None:
+            headers = {}
+        else:
+            resp = await page.goto(sample_url, timeout=0)
+            headers = await resp.request.all_headers()
         # Save cookies after login
         if isinstance(data_path, str):
             data_path = Path(data_path)
@@ -86,6 +95,7 @@ def sync_login_with_playwright(
     data_path: str | Path | None,
     user_agent: str = "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:106.0) Gecko/20100101 Firefox/106.0",
     headless: bool = False,
+    sample_url: str | None = None,
 ) -> dict:
     """
     :param headless:
@@ -100,6 +110,7 @@ def sync_login_with_playwright(
     :param password:
     :param css_login_button:
     :param data_path:
+    :param sample_url: optional page to visit after login; ``None`` skips it
     :return:
     """
     with sync_playwright() as playwright:
@@ -107,7 +118,7 @@ def sync_login_with_playwright(
         context = browser.new_context(user_agent=user_agent)
         # Open new page
         page = context.new_page()
-        # Go to http://108.170.5.99/forum.php
+        # Open the login page
         page.goto(login_url)
         # Click login button,
         if css_login_frame:
@@ -135,10 +146,11 @@ def sync_login_with_playwright(
         time.sleep(3 * random.random() + 3)
         # page.wait_for_url(login_url, timeout=10.0)
 
-        resp = page.goto(login_url, wait_until="domcontentloaded")
-
-        # print(resp.all_headers())
-        headers = resp.request.all_headers()
+        if sample_url is None:
+            headers = {}
+        else:
+            resp = page.goto(sample_url, wait_until="domcontentloaded")
+            headers = resp.request.all_headers()
 
         # Save login stage and cookies
         if isinstance(data_path, str):

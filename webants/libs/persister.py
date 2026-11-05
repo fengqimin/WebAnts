@@ -9,8 +9,8 @@ This module provides storage backends for saving crawled data with:
 
 import asyncio
 import csv
-import json
 import os
+import re
 import sqlite3
 import tempfile
 import time
@@ -20,7 +20,10 @@ from typing import Any, Dict, List, Optional, Union
 
 from webants.libs.exceptions import PersistenceError
 from webants.libs.result import Result
+from webants.utils import misc
 from webants.utils.logger import get_logger
+
+TABLE_NAME_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]{0,63}$")
 
 
 class BasePersister(ABC):
@@ -275,8 +278,8 @@ class JsonPersister(BasePersister):
         if not text.strip():
             return []
         try:
-            data = json.loads(text)
-        except json.JSONDecodeError as e:
+            data = misc.loads(text)
+        except ValueError as e:
             self.stats["load_errors"] += 1
             self.logger.warning(f"Skipping malformed legacy JSON array: {e}")
             return []
@@ -294,12 +297,10 @@ class JsonPersister(BasePersister):
             if not line:
                 continue
             try:
-                data.append(json.loads(line))
-            except json.JSONDecodeError as e:
+                data.append(misc.loads(line))
+            except ValueError as e:
                 self.stats["load_errors"] += 1
-                self.logger.warning(
-                    f"Skipping malformed NDJSON line {lineno} in {self.path}: {e}"
-                )
+                self.logger.warning(f"Skipping malformed NDJSON line {lineno} in {self.path}: {e}")
         return data
 
     @staticmethod
@@ -310,8 +311,7 @@ class JsonPersister(BasePersister):
         return [
             item
             for item in data
-            if isinstance(item, dict)
-            and all(item.get(k) == v for k, v in query.items())
+            if isinstance(item, dict) and all(item.get(k) == v for k, v in query.items())
         ]
 
     @staticmethod
@@ -321,7 +321,7 @@ class JsonPersister(BasePersister):
 
     def _serialize(self, item: Any) -> str:
         """Serialize one NDJSON line."""
-        return json.dumps(
+        return misc.dumps(
             item,
             ensure_ascii=self.ensure_ascii,
             separators=(",", ":"),
@@ -365,7 +365,7 @@ class JsonPersister(BasePersister):
     def _migrate_and_write(self, items: List) -> None:
         """Convert a legacy array to NDJSON and append the new items atomically."""
         with open(self.path, "r", encoding="utf-8") as f:
-            legacy = json.load(f)
+            legacy = misc.loads(f.read())
         if not isinstance(legacy, list):
             raise ValueError(f"Legacy JSON file is not an array: {self.path}")
 
@@ -487,11 +487,7 @@ class CsvPersister(BasePersister):
                 data = list(reader)
 
             if query:
-                data = [
-                    row
-                    for row in data
-                    if all(row.get(k) == v for k, v in query.items())
-                ]
+                data = [row for row in data if all(row.get(k) == v for k, v in query.items())]
 
             self.update_stats("load")
             return data
@@ -512,9 +508,7 @@ class CsvPersister(BasePersister):
             written = len(self._batch)
 
             with open(self.path, mode, newline="", encoding="utf-8") as f:
-                writer = csv.DictWriter(
-                    f, fieldnames=fieldnames, delimiter=self.delimiter
-                )
+                writer = csv.DictWriter(f, fieldnames=fieldnames, delimiter=self.delimiter)
 
                 if mode == "w":
                     writer.writeheader()
@@ -551,6 +545,10 @@ class SqlitePersister(BasePersister):
             batch_size: Number of rows to write at once
             **kwargs: Additional configuration
         """
+        if not isinstance(table_name, str) or not TABLE_NAME_RE.match(table_name):
+            raise ValueError(
+                f"table_name must match ^[A-Za-z_][A-Za-z0-9_]{{0,63}}$ (got {table_name!r})"
+            )
         super().__init__(path, **kwargs)
         self.table_name = table_name
         self.batch_size = batch_size
@@ -639,7 +637,7 @@ class SqlitePersister(BasePersister):
                 for row in rows:
                     item = dict(zip(columns, row))
                     if "data" in item:
-                        item["fields"] = json.loads(item["data"])
+                        item["fields"] = misc.loads(item["data"])
                         del item["data"]
                     data.append(item)
 
@@ -674,7 +672,7 @@ class SqlitePersister(BasePersister):
                             item.get("title"),
                             item.get("status"),
                             item.get("crawl_time"),
-                            json.dumps(item.get("fields", {})),
+                            misc.dumps(item.get("fields", {})),
                         ),
                     )
 
@@ -705,9 +703,7 @@ class PersisterManager:
         self._persisters: Dict[str, BasePersister] = {}
         self._default_persister: Optional[str] = None
 
-    def add_persister(
-        self, name: str, persister: BasePersister, is_default: bool = False
-    ) -> None:
+    def add_persister(self, name: str, persister: BasePersister, is_default: bool = False) -> None:
         """Add a persister backend.
 
         Args:

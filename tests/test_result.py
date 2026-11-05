@@ -1,6 +1,9 @@
-import pytest
 import time
+
+import pytest
+
 from webants.libs.result import Field, Result
+
 
 class TestField:
     def test_field_initialization(self):
@@ -33,21 +36,19 @@ class TestField:
         assert field_dict["extractor"] == "parser"
         assert isinstance(field_dict["timestamp"], float)
 
+
 class TestResult:
     @pytest.fixture
     def sample_result(self):
         """测试用的Result实例"""
-        fields = {
-            "title": Field(value="Test Title"),
-            "content": Field(value="Test Content")
-        }
+        fields = {"title": Field(value="Test Title"), "content": Field(value="Test Content")}
         return Result(
             spider="test_spider",
             fields=fields,
             url="http://example.com",
             mediatype="text/html",
             title="Page Title",
-            crawl_time=time.time()
+            crawl_time=time.time(),
         )
 
     def test_result_initialization(self, sample_result):
@@ -64,7 +65,7 @@ class TestResult:
         result = Result(
             spider="test_spider",
             fields={"title": "Test Title", "content": "Test Content"},
-            url="http://example.com"
+            url="http://example.com",
         )
         assert isinstance(result.fields["title"], Field)
         assert result.fields["title"].value == "Test Title"
@@ -97,7 +98,7 @@ class TestResult:
         result = Result(
             spider="test_spider",
             fields={"invalid": None},  # 这会触发错误
-            url="http://example.com"
+            url="http://example.com",
         )
         assert not result.is_valid()
         assert len(result.get_errors()) == 1
@@ -123,3 +124,12 @@ class TestResult:
         """测试保存方法(空实现)"""
         # 只是验证方法存在且可调用
         assert sample_result.save() is None
+
+    def test_explicit_zero_crawl_time_is_preserved(self):
+        result = Result(spider="spider", fields={}, crawl_time=0)
+        assert result.crawl_time == 0
+
+    def test_missing_crawl_time_defaults_to_now(self):
+        before = time.time()
+        result = Result(spider="spider", fields={})
+        assert before <= result.crawl_time <= time.time()

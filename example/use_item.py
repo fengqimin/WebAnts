@@ -1,13 +1,5 @@
 from webants.libs.item import (
-    AttrItem,
-    ElementItem,
-    LinkItem,
-    TextItem,
-    # temp
-    ItemDescriptor,
-    AttrItemDescriptor,
     LinkItemDescriptor,
-    ElementItemDescriptor,
     TextItemDescriptor,
 )
 

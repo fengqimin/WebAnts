@@ -19,7 +19,7 @@ from typing import Optional, Union
 import httpx
 
 from webants.libs.exceptions import RequestError
-from webants.libs.request import Request
+from webants.libs.request import DEFAULT_REQUEST_HEADERS, Request
 from webants.utils.logger import get_logger
 
 
@@ -187,12 +187,20 @@ class Downloader(BaseDownloader):
         return httpx.Limits(**{**defaults, **limits})
 
     def _setup_headers(self, headers: dict) -> dict:
-        """Setup default headers with user agent if not provided."""
-        headers.setdefault(
-            "User-Agent",
-            "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:106.0) Gecko/20100101 Firefox/116.0",
-        )
-        return headers
+        """Store downloader-level headers without injecting defaults.
+
+        ``DEFAULT_REQUEST_HEADERS`` is the single source of default values and
+        is applied per request in :meth:`effective_headers`.
+        """
+        return dict(headers)
+
+    def effective_headers(self, request: Request) -> dict[str, str]:
+        """Merge headers for one request.
+
+        Precedence: ``DEFAULT_REQUEST_HEADERS`` < downloader headers <
+        request headers.
+        """
+        return {**DEFAULT_REQUEST_HEADERS, **self.headers, **request.headers}
 
     def _setup_http_client(self) -> httpx.AsyncClient:
         """Create and configure httpx client."""
@@ -222,7 +230,7 @@ class Downloader(BaseDownloader):
             httpx.HTTPError: On transport-level failures.
         """
         start_time = time.perf_counter()
-        headers = request.headers or self.headers
+        headers = self.effective_headers(request)
 
         request_kwargs: dict = {
             "method": request.method,
@@ -242,9 +250,7 @@ class Downloader(BaseDownloader):
             )
             request_kwargs["headers"] = {
                 **headers,
-                "Cookie": "; ".join(
-                    f"{name}={value}" for name, value in merged_cookies.items()
-                ),
+                "Cookie": "; ".join(f"{name}={value}" for name, value in merged_cookies.items()),
             }
         if request.body is not None:
             if isinstance(request.body, dict):
@@ -262,9 +268,7 @@ class Downloader(BaseDownloader):
         elapsed = time.perf_counter() - start_time
         self._update_stats(elapsed)
         self.logger.info(
-            f"Request completed - {request}, "
-            f"Status: {response.status_code}, "
-            f"Time: {elapsed:.3f}s"
+            f"Request completed - {request}, Status: {response.status_code}, Time: {elapsed:.3f}s"
         )
         return response
 
@@ -403,8 +407,7 @@ class Downloader(BaseDownloader):
                 if attempt + 1 >= max_attempts:
                     self._record_final_result(success=False, retried=retried)
                     raise RequestError(
-                        f"Retryable status {response.status_code} after "
-                        f"{attempt + 1} attempt(s)",
+                        f"Retryable status {response.status_code} after {attempt + 1} attempt(s)",
                         code="RETRY_EXHAUSTED",
                         retryable=False,
                         metadata={

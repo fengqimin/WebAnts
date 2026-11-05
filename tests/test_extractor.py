@@ -50,7 +50,7 @@ def test_link_class():
     link = Link("http://example.com", unique=True)
     assert link.url == "http://example.com"
     assert link.unique is True
-    
+
     # Test remove_suffix method
     link = Link("http://example.com/index.html", unique=True)
     new_link = link.remove_suffix(".html")
@@ -63,11 +63,11 @@ def test_iter_elements(html_tree):
     # Test with single tag
     a_elements = list(iter_elements(html_tree, tags="a"))
     assert len(a_elements) == 2
-    
+
     # Test with multiple tags
     elements = list(iter_elements(html_tree, tags=["a", "p"]))
     assert len(elements) == 3
-    
+
     # Test with attribute filter
     img_elements = list(iter_elements(html_tree, tags="img", attr="alt"))
     assert len(img_elements) == 1
@@ -78,11 +78,11 @@ def test_find_elements(html_tree):
     # Test with CSS selector
     elements = find_elements(html_tree, selector="div.content a")
     assert len(elements) == 2
-    
+
     # Test with XPath
     elements = find_elements(html_tree, xpath="//p[@class='text']")
     assert len(elements) == 1
-    
+
     # Test with tags and attribute
     elements = find_elements(html_tree, tags="img", attr="src")
     assert len(elements) == 1
@@ -94,11 +94,43 @@ def test_extract_attrib(html_tree):
     hrefs = extract_attrib(html_tree, "href", tags="a")
     assert len(hrefs) == 2
     assert "/page1" in hrefs
-    
+
     # Test alt attribute from images
     alts = extract_attrib(html_tree, "alt", tags="img")
     assert len(alts) == 1
     assert "Test Image" in alts
+
+
+def test_extract_links_skips_empty_href():
+    html = etree.HTML(
+        '<html><body><a href="">empty</a><a name="anchor">no href</a>'
+        '<a href="/ok">ok</a></body></html>'
+    )
+    links = extract_links(html, tags="a", base_url="http://example.com")
+    assert [link.url for link in links] == ["http://example.com/ok"]
+
+
+def test_attrib_extractor_returns_none_for_non_element():
+    assert AttribExtractor(attr="href")._extract_element("plain text") is None
+
+
+def test_extract_and_filter_links_deduplicates_by_url():
+    html = etree.HTML('<html><body><a href="/dup">1</a><a href="/dup">2</a></body></html>')
+    unique = extract_and_filter_links(
+        html,
+        tags="a",
+        base_url="http://example.com",
+        unique=True,
+    )
+    assert [link.url for link in unique] == ["http://example.com/dup"]
+
+    duplicates = extract_and_filter_links(
+        html,
+        tags="a",
+        base_url="http://example.com",
+        unique=False,
+    )
+    assert len(duplicates) == 2
 
 
 def test_extract_links(html_tree):
@@ -106,7 +138,7 @@ def test_extract_links(html_tree):
     # Test without base_url
     links = extract_links(html_tree, tags="a")
     assert len(links) == 2
-    
+
     # Test with base_url
     links = extract_links(html_tree, tags="a", base_url="http://example.com")
     assert len(links) == 2
@@ -118,7 +150,7 @@ def test_extract_text(html_tree):
     # Test with specific tag
     texts = extract_text(html_tree, tags="p")
     assert "Sample Text" in texts
-    
+
     # Test with CSS selector
     texts = extract_text(html_tree, selector="div.content p")
     assert "Sample Text" in texts
@@ -181,9 +213,9 @@ def test_filtering_link_extractor():
         base_url="http://example.com",
         hosts_allow=["example.com"],
         extensions_deny=["pdf", "zip"],
-        schemes_allow=["http", "https"]
+        schemes_allow=["http", "https"],
     )
-    
+
     html = """
     <div>
         <a href="/page1.html">Link 1</a>
@@ -192,7 +224,7 @@ def test_filtering_link_extractor():
         <a href="ftp://example.com/file">FTP</a>
     </div>
     """
-    
+
     links = extractor.extract(html)
     assert len(links) == 1  # Only /page1.html should be allowed
     assert links[0].url == "http://example.com/page1.html"
@@ -203,19 +235,22 @@ def test_extractor_factory():
     # Test creating different types of extractors
     link_extractor = ExtractorFactory.create_extractor("LinkExtractor")
     assert isinstance(link_extractor(), LinkExtractor)
-    
+
     text_extractor = ExtractorFactory.create_extractor("TextExtractor")
     assert isinstance(text_extractor(), TextExtractor)
-    
+
     with pytest.raises(Exception):
         ExtractorFactory.create_extractor("NonExistentExtractor")
 
 
-@pytest.mark.parametrize("html,expected", [
-    ("<p>Simple text</p>", ["Simple text"]),
-    ("<div><p>Nested text</p></div>", ["Nested text"]),
-    ("<p>Multiple</p><p>paragraphs</p>", ["Multiple", "paragraphs"]),
-])
+@pytest.mark.parametrize(
+    "html,expected",
+    [
+        ("<p>Simple text</p>", ["Simple text"]),
+        ("<div><p>Nested text</p></div>", ["Nested text"]),
+        ("<p>Multiple</p><p>paragraphs</p>", ["Multiple", "paragraphs"]),
+    ],
+)
 def test_text_extraction_variations(html, expected):
     """Test text extraction with different HTML structures"""
     extractor = TextExtractor(tags="p")
@@ -223,11 +258,14 @@ def test_text_extraction_variations(html, expected):
     assert all(exp in results for exp in expected)
 
 
-@pytest.mark.parametrize("url,unique,expected", [
-    ("http://example.com", True, "http://example.com"),
-    ("http://example.com/", True, "http://example.com/"),
-    ("/relative/path", True, "/relative/path"),
-])
+@pytest.mark.parametrize(
+    "url,unique,expected",
+    [
+        ("http://example.com", True, "http://example.com"),
+        ("http://example.com/", True, "http://example.com/"),
+        ("/relative/path", True, "/relative/path"),
+    ],
+)
 def test_link_variations(url, unique, expected):
     """Test Link class with different URL patterns"""
     link = Link(url, unique=unique)
@@ -237,9 +275,7 @@ def test_link_variations(url, unique, expected):
 
 def test_module_filter_allows_links_without_allow_lists():
     """P1-15: an empty configuration must not reject every link."""
-    links = extract_and_filter_links(
-        '<a href="/page1">Link</a>', base_url="http://example.com"
-    )
+    links = extract_and_filter_links('<a href="/page1">Link</a>', base_url="http://example.com")
     assert [link.url for link in links] == ["http://example.com/page1"]
 
 
@@ -253,9 +289,7 @@ def test_filtering_link_extractor_normalize_false():
 def test_filtering_link_extractor_normalize_true_rewrites_output():
     """P1-05: normalize=True must rewrite the returned Link, not just a local."""
     extractor = FilteringLinkExtractor(base_url="http://example.com", normalize=True)
-    links = extractor.extract(
-        '<a href="HTTP://Example.COM:80/p?b=2&amp;a=1#frag">Link</a>'
-    )
+    links = extractor.extract('<a href="HTTP://Example.COM:80/p?b=2&amp;a=1#frag">Link</a>')
     assert [link.url for link in links] == ["http://Example.COM/p?a=1&b=2"]
 
 
@@ -309,4 +343,3 @@ def test_module_filter_scheme_deny_takes_effect():
         schemes_deny=["http"],
     )
     assert links == []
-

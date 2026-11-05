@@ -102,7 +102,9 @@ class Request:
 
         self.url = normalize_url(url) if normalize else url
         self.method = method.upper()
-        self.headers = {**DEFAULT_REQUEST_HEADERS, **(headers or {})}
+        # Only explicit headers are stored here. The downloader merges them on
+        # top of ``DEFAULT_REQUEST_HEADERS`` and its own configured headers.
+        self.headers = dict(headers or {})
         self.body = body
         self.cookies = cookies or {}
         self.encoding = encoding
@@ -181,9 +183,7 @@ class Request:
         if callback is None:
             return
         if not callable(callback):
-            raise TypeError(
-                f"{name} must be callable, got {type(callback).__name__}"
-            )
+            raise TypeError(f"{name} must be callable, got {type(callback).__name__}")
 
         target = inspect.unwrap(callback)
         is_coroutine = inspect.iscoroutinefunction(target)
@@ -211,24 +211,25 @@ class Request:
         if cb_kwargs is None:
             return
         if not isinstance(cb_kwargs, dict):
-            raise TypeError(
-                f"cb_kwargs must be a dict, got {type(cb_kwargs).__name__}"
-            )
+            raise TypeError(f"cb_kwargs must be a dict, got {type(cb_kwargs).__name__}")
         if "response" in cb_kwargs:
             raise TypeError("cb_kwargs must not contain the reserved key 'response'")
         non_string_keys = [key for key in cb_kwargs if not isinstance(key, str)]
         if non_string_keys:
-            raise TypeError(
-                f"cb_kwargs keys must be str, got {non_string_keys!r}"
-            )
+            raise TypeError(f"cb_kwargs keys must be str, got {non_string_keys!r}")
 
     def __repr__(self) -> str:
         """String representation."""
         return f"<Request [{self.method}] {self.url}>"
 
     def __lt__(self, other: "Request") -> bool:
-        """Compare requests by priority."""
-        return not self.priority < other.priority
+        """Compare requests by priority; a lower value is dequeued first.
+
+        Equal priorities are equivalent, which makes this a strict weak
+        ordering. The scheduler uses ``(priority, sequence)`` tuples and does
+        not depend on this method.
+        """
+        return self.priority < other.priority
 
     def __eq__(self, other: object) -> bool:
         """Compare requests for equality."""

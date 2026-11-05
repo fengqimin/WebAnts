@@ -226,14 +226,10 @@ class Spider:
             else config_value("downloader.request_timeout", 30)
         )
         retry_times = (
-            retry_times
-            if retry_times is not None
-            else config_value("downloader.retry_times", 3)
+            retry_times if retry_times is not None else config_value("downloader.retry_times", 3)
         )
         retry_delay = (
-            retry_delay
-            if retry_delay is not None
-            else config_value("downloader.retry_delay", 1.0)
+            retry_delay if retry_delay is not None else config_value("downloader.retry_delay", 1.0)
         )
         failure_threshold = (
             failure_threshold
@@ -274,9 +270,7 @@ class Spider:
         )
         self.parser = Parser(
             encoding=config_value("parser.default_encoding", "utf-8"),
-            max_document_size=config_value(
-                "parser.max_document_size", 10 * 1024 * 1024
-            ),
+            max_document_size=config_value("parser.max_document_size", 10 * 1024 * 1024),
             cache_size=config_value("parser.cache_size", 1000),
             log_level=log_level,
         )
@@ -318,6 +312,7 @@ class Spider:
             "retry_count": 0,
             "circuits_open": 0,
             "avg_request_time": 0.0,
+            "total_request_time": 0.0,
             "filtered_requests": 0,
             "filtered_responses": 0,
             "middleware_retries": 0,
@@ -348,9 +343,7 @@ class Spider:
         if isinstance(level, int):
             return level
 
-        logging.getLogger("Spider").warning(
-            f"Unknown logging level {value!r}, using INFO"
-        )
+        logging.getLogger("Spider").warning(f"Unknown logging level {value!r}, using INFO")
         return logging.INFO
 
     def _setup_signals(self) -> None:
@@ -376,9 +369,7 @@ class Spider:
             self.stats["domain_stats"][domain].get("scheduled", 0) + 1
         )
 
-    def _on_request_finished(
-        self, sender: Any, request: Request, success: bool
-    ) -> None:
+    def _on_request_finished(self, sender: Any, request: Request, success: bool) -> None:
         """Handle request finished signal."""
         domain = self._get_domain(request.url)
         stats = self.stats["domain_stats"][domain]
@@ -420,9 +411,7 @@ class Spider:
                 timeout=self.settings["REQUEST_TIMEOUT"],
             )
 
-    async def parse(
-        self, response: Any, **kwargs
-    ) -> AsyncGenerator[Union[Request, Result], None]:
+    async def parse(self, response: Any, **kwargs) -> AsyncGenerator[Union[Request, Result], None]:
         """Default parse method.
 
         Args:
@@ -496,9 +485,7 @@ class Spider:
                 await self._dispatch_item(item)
             return
 
-        if isinstance(value, Iterable) and not isinstance(
-            value, (str, bytes, bytearray, dict)
-        ):
+        if isinstance(value, Iterable) and not isinstance(value, (str, bytes, bytearray, dict)):
             for item in value:
                 await self._dispatch_item(item)
             return
@@ -564,13 +551,9 @@ class Spider:
         failed = [name for name, success in results.items() if not success]
         if failed:
             self.stats["persist_failures"] += len(failed)
-            self.logger.error(
-                f"Persisting result for {item.url} failed for: {', '.join(failed)}"
-            )
+            self.logger.error(f"Persisting result for {item.url} failed for: {', '.join(failed)}")
 
-    async def _prepare_response(
-        self, request: Request
-    ) -> Optional[tuple[Request, Any]]:
+    async def _prepare_response(self, request: Request) -> Optional[tuple[Request, Any]]:
         """Run the middleware phases that precede the callback.
 
         Returns:
@@ -588,9 +571,7 @@ class Spider:
             prepared = await self.middleware.process_request(request)
             if prepared is None:
                 self.stats["filtered_requests"] += 1
-                self.signals.send(
-                    "request_dropped", self, request=request, reason="middleware"
-                )
+                self.signals.send("request_dropped", self, request=request, reason="middleware")
                 return None
 
             if self._get_domain(prepared.url) != self._get_domain(request.url):
@@ -626,8 +607,7 @@ class Spider:
             replacement = await self.middleware.process_exception(exception, request)
         except Exception as middleware_error:
             self.logger.error(
-                f"Error in middleware.process_exception for {request.url}: "
-                f"{middleware_error}"
+                f"Error in middleware.process_exception for {request.url}: {middleware_error}"
             )
             return "none", None
 
@@ -643,8 +623,7 @@ class Spider:
             retries = 0
         if retries >= self.middleware_max_retries:
             self.logger.warning(
-                f"Middleware retry limit reached for {request.url} "
-                f"({self.middleware_max_retries})"
+                f"Middleware retry limit reached for {request.url} ({self.middleware_max_retries})"
             )
             return "none", None
 
@@ -682,9 +661,7 @@ class Spider:
 
         try:
             if not circuit.allow_request():
-                self.logger.warning(
-                    f"Request blocked by circuit breaker: {request.url}"
-                )
+                self.logger.warning(f"Request blocked by circuit breaker: {request.url}")
                 return
 
             prepared = await self._prepare_response(request)
@@ -706,8 +683,7 @@ class Spider:
                     result = await self._schedule(replacement)
                 except Exception as schedule_error:
                     self.logger.error(
-                        f"Error scheduling middleware retry for {request.url}: "
-                        f"{schedule_error}"
+                        f"Error scheduling middleware retry for {request.url}: {schedule_error}"
                     )
                     e = schedule_error
                 else:
@@ -715,8 +691,7 @@ class Spider:
                     if not result:
                         reason = result.reason.value if result else "closed"
                         self.logger.warning(
-                            f"Middleware retry for {request.url} was not "
-                            f"scheduled: {reason}"
+                            f"Middleware retry for {request.url} was not scheduled: {reason}"
                         )
                     return
 
@@ -728,9 +703,7 @@ class Spider:
                 else:
                     circuit.record_success()
                     self.stats["successful_requests"] += 1
-                    self.signals.send(
-                        "request_finished", self, request=request, success=True
-                    )
+                    self.signals.send("request_finished", self, request=request, success=True)
                     return
 
             was_open = circuit.state == "open"
@@ -744,9 +717,7 @@ class Spider:
                 try:
                     await request.errback(e, request)
                 except Exception as errback_error:
-                    self.logger.error(
-                        f"Error in errback for {request.url}: {str(errback_error)}"
-                    )
+                    self.logger.error(f"Error in errback for {request.url}: {str(errback_error)}")
             self.signals.send("request_finished", self, request=request, success=False)
 
         finally:
@@ -755,15 +726,14 @@ class Spider:
             if slot is not None:
                 slot.release()
 
-            # Update timing stats. ``completed_requests`` is the denominator a
-            # correct average needs; ``avg_request_time`` keeps its old
-            # (started-based) formula until P2-21 is addressed.
+            # ``avg_request_time`` is the mean duration of completed requests;
+            # in-flight requests never contribute to the denominator.
             self.stats["completed_requests"] += 1
             elapsed = time.time() - start_time
-            total_requests = self.stats["total_requests"]
+            self.stats["total_request_time"] += elapsed
             self.stats["avg_request_time"] = (
-                self.stats["avg_request_time"] * (total_requests - 1) + elapsed
-            ) / total_requests
+                self.stats["total_request_time"] / self.stats["completed_requests"]
+            )
 
     def _on_task_done(self, task: asyncio.Task) -> None:
         """Retire a finished task and observe how it ended.
@@ -834,8 +804,7 @@ class Spider:
                     # in-flight task and no activity for ``idle_grace``.
                     if (
                         not self._inflight
-                        and time.monotonic() - self._last_activity
-                        >= self.idle_grace
+                        and time.monotonic() - self._last_activity >= self.idle_grace
                     ):
                         break
                     continue
@@ -843,9 +812,7 @@ class Spider:
                 self._last_activity = time.monotonic()
                 request = slot.request
                 try:
-                    task = asyncio.create_task(
-                        self.process_request(request, slot=slot)
-                    )
+                    task = asyncio.create_task(self.process_request(request, slot=slot))
                 except Exception:
                     # The task never started, so nobody else can release.
                     slot.release()
@@ -937,9 +904,7 @@ class Spider:
             "processing": [request.url for request in self._inflight.values()],
             "inflight_count": len(self._inflight),
             "closed": self._closed,
-            "circuits": {
-                domain: cb.state for domain, cb in self._domain_circuits.items()
-            },
+            "circuits": {domain: cb.state for domain, cb in self._domain_circuits.items()},
         }
         if self.middleware is not None:
             stats["middleware_stats"] = self.middleware.get_stats()

@@ -1,25 +1,22 @@
-from typing import Sequence, Callable
-
+from typing import Callable, Sequence
 
 import lxml.etree
 
-
 from webants.libs.extractor import (
-    Link,
-    ExtractorFactory,
-    BaseExtractor,
     AttribExtractor,
-    FilteringLinkExtractor,
+    BaseExtractor,
     ElementExtractor,
+    ExtractorFactory,
+    FilteringLinkExtractor,
+    Link,
 )
-
 from webants.utils.logger import get_logger
-
 
 mod_logger = get_logger("Item", log_level=20)
 
 
 __all__ = [
+    "Item",
     "AttrItem",
     "ElementItem",
     "LinkItem",
@@ -97,8 +94,7 @@ class _Item:
         # before the caller assigns the document.
         if value is not None and not isinstance(value, (str, lxml.etree._Element)):
             raise TypeError(
-                f"Expected html to be str, etree._Element or None, "
-                f"got {value.__class__.__name__}"
+                f"Expected html to be str, etree._Element or None, got {value.__class__.__name__}"
             )
         self._html = value
 
@@ -326,3 +322,7 @@ class TextItemDescriptor(ItemDescriptor):
             iter_text=iter_text,
             many=many,
         )
+
+
+# Public alias for the descriptor base class.
+Item = _Item

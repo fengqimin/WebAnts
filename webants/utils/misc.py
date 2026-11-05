@@ -1,6 +1,6 @@
+import hashlib
 import re
 from typing import Any
-import hashlib
 
 try:
     import ujson as json
@@ -8,16 +8,42 @@ except ImportError:
     import json
 
 __all__ = [
-    'args_to_list',
-    'copy_object',
-    'valid_path',
+    "args_to_list",
+    "copy_object",
+    "dumps",
+    "loads",
+    "valid_path",
 ]
+
+
+def dumps(obj: Any, **kwargs) -> str:
+    """Serialize ``obj`` with ujson when available, otherwise stdlib json.
+
+    ujson ignores or rejects some stdlib-only options; ``separators`` is
+    dropped on ``TypeError`` and the compact default output is used instead.
+    Serialization errors are never swallowed.
+    """
+    try:
+        return json.dumps(obj, **kwargs)
+    except TypeError:
+        kwargs.pop("separators", None)
+        return json.dumps(obj, **kwargs)
+
+
+def loads(text: Any, **kwargs) -> Any:
+    """Deserialize JSON using the same backend as :func:`dumps`.
+
+    Malformed input raises ``ValueError`` (both stdlib and ujson decode errors
+    derive from it).
+    """
+    return json.loads(text, **kwargs)
+
 
 InvalidPathRegex = re.compile(r'[\\/:*?"<>|\t\r\n]')
 
 
 def valid_path(path):
-    return InvalidPathRegex.sub('-', str(path))
+    return InvalidPathRegex.sub("-", str(path))
 
 
 def args_to_list(args: Any) -> list:
@@ -39,18 +65,19 @@ def copy_object(obj: object, *args, **kwargs):
         **kwargs: Keyword arguments that will override object attributes.
                  Special 'cls' parameter can be used to change the class.
     """
-    if not hasattr(obj, '__dict__'):
+    if not hasattr(obj, "__dict__"):
         return obj
 
     # 提取目标类，默认为原对象的类
-    cls: type = kwargs.pop('cls', obj.__class__)
+    cls: type = kwargs.pop("cls", obj.__class__)
 
     # 构造函数签名适配：只保留属于目标类 __init__ 的参数
     import inspect
+
     try:
         sig = inspect.signature(cls.__init__)
         init_params = set(sig.parameters.keys())
-        init_kwargs = {k: v for k, v in kwargs.items() if k in init_params or k == 'cls'}
+        init_kwargs = {k: v for k, v in kwargs.items() if k in init_params or k == "cls"}
     except Exception:
         # 若无法获取签名，则不过滤参数
         init_kwargs = kwargs.copy()
@@ -71,10 +98,10 @@ def copy_object(obj: object, *args, **kwargs):
 
 def read_html(html_file, encoding=None):
     if encoding is None:
-        with open(html_file, 'rb') as fp:
+        with open(html_file, "rb") as fp:
             data = fp.read()
     else:
-        with open(html_file, 'r', encoding=encoding) as fp:
+        with open(html_file, "r", encoding=encoding) as fp:
             data = fp.read()
     return data
 
@@ -114,11 +141,10 @@ def deduplicate_from_list(_list, key):
 
 
 def load_json(json_file: str):
-    """从文件中载入json
-    """
+    """从文件中载入json"""
     if isinstance(json_file, str):
         file = json_file
-        with open(file, 'r', encoding='utf-8') as fp:
+        with open(file, "r", encoding="utf-8") as fp:
             data = json.load(fp)
             return data
     else:
@@ -132,16 +158,15 @@ def dump_json(data, file):
     :param file:json文件
     :return:
     """
-    with open(file, 'w', encoding='utf-8') as fp:
+    with open(file, "w", encoding="utf-8") as fp:
         json.dump(data, fp)
 
 
 def load_requested_urls(file_or_list):
-    """载入已经被爬取ulr的json
-    """
+    """载入已经被爬取ulr的json"""
     if isinstance(file_or_list, str):
         file = file_or_list
-        with open(file, 'r', encoding='utf-8') as fp:
+        with open(file, "r", encoding="utf-8") as fp:
             data = json.load(fp)
     else:
         data = file_or_list
@@ -162,16 +187,17 @@ def dump_requested_url(done_urls, file):
         done_urls = list(done_urls)
 
     if file:
-        with open(file, 'w', encoding='utf-8') as fp:
+        with open(file, "w", encoding="utf-8") as fp:
             json.dump(done_urls, fp)
 
 
-def json2db(json_file, db_file=r'D:\My Projects\Python\WebCrawler\copy_hkpic.db'):
-    import sqlite3
+def json2db(json_file, db_file=r"D:\My Projects\Python\WebCrawler\copy_hkpic.db"):
     import hashlib
-    status = 'SUCCESS'
+    import sqlite3
 
-    with open(json_file, 'r', encoding='utf-8') as fp:
+    status = "SUCCESS"
+
+    with open(json_file, "r", encoding="utf-8") as fp:
         data = json.load(fp)
     db_conn = sqlite3.connect(db_file)
     cur = db_conn.cursor()
@@ -187,7 +213,7 @@ def json2db(json_file, db_file=r'D:\My Projects\Python\WebCrawler\copy_hkpic.db'
         col_status = status
         column = (col_id.hexdigest(), col_url, col_status)
         print(column)
-        cur.execute('INSERT INTO seen_urls VALUES (?,?,?)', column)
+        cur.execute("INSERT INTO seen_urls VALUES (?,?,?)", column)
     cur.close()
     db_conn.commit()
     db_conn.close()

@@ -25,9 +25,7 @@ def failing_handler(request: httpx.Request) -> httpx.Response:
 async def offline_spider(spider: Spider, handler):
     """Replace the downloader client with a MockTransport-backed client."""
     await spider.downloader.client.aclose()
-    spider.downloader.client = httpx.AsyncClient(
-        transport=httpx.MockTransport(handler)
-    )
+    spider.downloader.client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
     try:
         yield spider
     finally:
@@ -240,9 +238,7 @@ async def test_invalid_yield_goes_to_errback_once():
 
     async with offline_spider(spider, site_handler):
         items = collect_items(spider)
-        request = Request(
-            url="http://example.com/", callback=spider.parse, errback=errback
-        )
+        request = Request(url="http://example.com/", callback=spider.parse, errback=errback)
 
         await run_request_chain(spider, request)
 
@@ -263,9 +259,7 @@ async def test_callback_exception_goes_to_errback_once():
         errors.append(error)
 
     async with offline_spider(spider, site_handler):
-        request = Request(
-            url="http://example.com/", callback=spider.parse, errback=errback
-        )
+        request = Request(url="http://example.com/", callback=spider.parse, errback=errback)
 
         await run_request_chain(spider, request)
 
@@ -583,10 +577,7 @@ async def test_task_escape_is_counted_and_consumed():
 
     assert spider.stats["unhandled_task_errors"] == 1
     assert spider.stats["failed_requests"] == 0
-    assert all(
-        "never retrieved" not in str(context.get("message", ""))
-        for context in reported
-    )
+    assert all("never retrieved" not in str(context.get("message", "")) for context in reported)
 
 
 @pytest.mark.asyncio
@@ -630,3 +621,33 @@ async def test_schedule_after_close_returns_none():
     assert result is None
     assert spider.scheduler.request_queue.qsize() == 0
     assert spider.scheduler.stats["current_requests"] == 0
+
+
+class TimedSpider(Spider):
+    name = "timed"
+
+    async def parse(self, response, **kwargs):
+        await asyncio.sleep(0.02 if response.url.path == "/fast" else 0.06)
+        yield Result(spider=self.name, fields={}, url=str(response.url))
+
+
+@pytest.mark.asyncio
+async def test_avg_request_time_uses_completed_requests():
+    """In-flight requests must not dilute the completed-request average."""
+    spider = TimedSpider(concurrent_requests=2)
+    async with offline_spider(spider, site_handler):
+        await spider._schedule(Request(url="http://example.com/fast", callback=spider.parse))
+        await spider._schedule(Request(url="http://example.com/slow", callback=spider.parse))
+        first = await spider.scheduler.get_request()
+        second = await spider.scheduler.get_request()
+        await asyncio.gather(
+            spider.process_request(first.request, slot=first),
+            spider.process_request(second.request, slot=second),
+        )
+
+    stats = spider.get_stats()
+    assert stats["completed_requests"] == 2
+    assert stats["total_requests"] == 2
+    assert stats["avg_request_time"] == pytest.approx(
+        stats["total_request_time"] / stats["completed_requests"]
+    )

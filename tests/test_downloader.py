@@ -171,6 +171,42 @@ async def test_downloader_never_invokes_callback(downloader):
 
 
 @pytest.mark.asyncio
+async def test_header_precedence_default_downloader_request():
+    dl = Downloader(headers={"User-Agent": "downloader-agent", "X-D": "d"})
+    try:
+        merged = dl.effective_headers(Request("http://example.com/"))
+        assert merged["User-Agent"] == "downloader-agent"
+        assert merged["X-D"] == "d"
+        assert merged["Accept"]
+
+        override = Request(
+            "http://example.com/",
+            headers={"User-Agent": "request-agent"},
+        )
+        assert dl.effective_headers(override)["User-Agent"] == "request-agent"
+    finally:
+        await dl.close()
+
+
+@pytest.mark.asyncio
+async def test_downloader_headers_reach_the_wire():
+    dl = Downloader(headers={"User-Agent": "downloader-agent"})
+    captured = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured["user-agent"] = request.headers["user-agent"]
+        return httpx.Response(200, request=request)
+
+    await install_handler(dl, handler)
+    try:
+        await dl.fetch(Request("http://example.com/"))
+    finally:
+        await dl.close()
+
+    assert captured["user-agent"] == "downloader-agent"
+
+
+@pytest.mark.asyncio
 async def test_body_cookies_and_referer_are_sent(downloader):
     captured = {}
 
@@ -201,9 +237,7 @@ async def test_body_cookies_and_referer_are_sent(downloader):
 @pytest.mark.asyncio
 async def test_retry_after_seconds_is_honored(downloader):
     def too_many_requests(request: httpx.Request) -> httpx.Response:
-        return httpx.Response(
-            429, headers={"Retry-After": "7"}, request=request
-        )
+        return httpx.Response(429, headers={"Retry-After": "7"}, request=request)
 
     handler = sequence_handler(too_many_requests, 200)
     await install_handler(downloader, handler)
@@ -275,9 +309,7 @@ async def test_start_downloader_does_not_cancel_host_tasks(downloader):
     await install_handler(downloader, sequence_handler(200))
 
     host = asyncio.create_task(asyncio.sleep(30))
-    downloader.request_queue.put_nowait(
-        (0, Request(url="http://example.com/worker-mode"))
-    )
+    downloader.request_queue.put_nowait((0, Request(url="http://example.com/worker-mode")))
 
     try:
         await asyncio.wait_for(downloader.start_downloader(2), timeout=5)
