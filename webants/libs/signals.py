@@ -8,15 +8,13 @@ This module provides an event system with:
 """
 
 import asyncio
-import inspect
-import logging
+import itertools
 from collections import defaultdict
 from contextlib import contextmanager
-from typing import Any, Awaitable, Callable, Dict, List, Optional, Set, Union
+from typing import Any, Awaitable, Callable, Dict, List, Set, Union
 
 from webants.libs.exceptions import exception_tracker
 from webants.utils.logger import get_logger
-
 
 # Signal sender types
 Sender = Union[str, object, None]
@@ -38,8 +36,10 @@ class Signal:
         self.__doc__ = doc
         self.logger = get_logger(f"Signal[{name}]")
         
-        # Receivers stored by sender
-        self._receivers: Dict[Sender, List[tuple[int, Handler]]] = defaultdict(list)
+        # Receivers stored by sender as (priority, sequence, handler)
+        self._receivers: Dict[Sender, List[tuple[int, int, Handler]]] = defaultdict(list)
+        # Monotonic connection sequence, used as a stable tie-breaker
+        self._seq = itertools.count()
         # Set to track temporary disconnections
         self._disabled: Set[Handler] = set()
         
@@ -58,14 +58,14 @@ class Signal:
             List of (receiver, result) pairs
         """
         responses = []
-        if not self._receivers[sender] and not self._receivers[None]:
-            return responses
-            
+
         # Get all matching receivers
         receivers = self._get_receivers(sender)
-        
-        # Process receivers in priority order
-        for priority, receiver in sorted(receivers):
+        if not receivers:
+            return responses
+
+        # Higher priority first; equal priorities keep connection order
+        for priority, seq, receiver in sorted(receivers, key=lambda item: (-item[0], item[1])):
             if receiver in self._disabled:
                 continue
                 
@@ -102,7 +102,7 @@ class Signal:
                 f"Signal receiver {receiver.__name__} must be a coroutine function"
             )
         
-        self._receivers[sender].append((priority, receiver))
+        self._receivers[sender].append((priority, next(self._seq), receiver))
         
     def disconnect(
         self,
@@ -118,31 +118,33 @@ class Signal:
         if sender is None:
             for s in list(self._receivers.keys()):
                 self._receivers[s] = [
-                    (p, r) for p, r in self._receivers[s]
+                    (p, seq, r) for p, seq, r in self._receivers[s]
                     if r != receiver
                 ]
         else:
             self._receivers[sender] = [
-                (p, r) for p, r in self._receivers[sender]
+                (p, seq, r) for p, seq, r in self._receivers[sender]
                 if r != receiver
             ]
             
     def _get_receivers(
         self,
         sender: Sender
-    ) -> List[tuple[int, Handler]]:
+    ) -> List[tuple[int, int, Handler]]:
         """Get all receivers for a sender.
         
         Args:
             sender: Signal sender
             
         Returns:
-            List of (priority, handler) pairs
+            List of (priority, sequence, handler) tuples
         """
-        # Include receivers for specific sender and None (any sender)
-        return (
-            self._receivers[sender].copy() +
-            self._receivers[None].copy()
+        # Include receivers for the specific sender and None (any sender).
+        # When sender is None, the list must not be concatenated with itself.
+        if sender is None:
+            return list(self._receivers.get(None, ()))
+        return list(self._receivers.get(sender, ())) + list(
+            self._receivers.get(None, ())
         )
         
     @contextmanager

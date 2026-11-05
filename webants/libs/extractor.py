@@ -1,8 +1,8 @@
 import re
 from abc import abstractmethod
 from collections.abc import Sequence
-from typing import Generator, TypeVar, Any, Type, Callable
-from urllib.parse import urlparse, urljoin
+from typing import Any, Callable, Generator, Type, TypeVar
+from urllib.parse import urljoin, urlparse
 
 from lxml import etree
 from lxml.cssselect import CSSSelector
@@ -11,7 +11,6 @@ from webants.libs.exceptions import InvalidExtractor
 from webants.utils.logger import get_logger
 from webants.utils.misc import args_to_list
 from webants.utils.url import lenient_host, normalize_url
-
 
 __all__ = [
     "Link",
@@ -221,6 +220,137 @@ def extract_links(
     return results
 
 
+def _extension_of(path: str) -> str:
+    """Return the lower-case extension of a URL path, or ``""`` when absent."""
+    segment = path.rsplit("/", 1)[-1]
+    if "." not in segment:
+        return ""
+    return segment.rsplit(".", 1)[-1].lower()
+
+
+def _canonical_url(url: str) -> str:
+    """Normalize a URL for filtering; fall back to the raw string on failure."""
+    try:
+        return normalize_url(url)
+    except Exception:
+        return url
+
+
+class _LinkFilter:
+    """Shared link filtering core. Every entry point passes a URL string."""
+
+    def __init__(
+        self,
+        *,
+        extensions_deny: list[str] = None,
+        extensions_allow: list[str] = None,
+        hosts_allow: list[str] = None,
+        hosts_deny: list[str] = None,
+        schemes_allow: list[str] = None,
+        schemes_deny: list[str] = None,
+        regexps_allow: list[str] = None,
+        regexps_deny: list[str] = None,
+        lenient: bool = False,
+    ):
+        self.extensions_deny = self._normalize(extensions_deny)
+        self.extensions_allow = self._normalize(extensions_allow)
+        self.hosts_allow = self._normalize(hosts_allow)
+        self.hosts_deny = self._normalize(hosts_deny)
+        self.schemes_allow = self._normalize(schemes_allow)
+        self.schemes_deny = self._normalize(schemes_deny)
+        self.regexps_allow = self._compile(regexps_allow)
+        self.regexps_deny = self._compile(regexps_deny)
+        self.lenient = lenient
+        self._lenient_hosts_allow = {lenient_host(_) for _ in self.hosts_allow}
+        self._lenient_hosts_deny = {lenient_host(_) for _ in self.hosts_deny}
+
+    @staticmethod
+    def _normalize(values) -> list[str]:
+        return [_.lower() for _ in set(args_to_list(values))]
+
+    @staticmethod
+    def _compile(patterns) -> list[re.Pattern]:
+        return [re.compile(_) for _ in set(args_to_list(patterns)) if isinstance(_, str)]
+
+    def _host_allowed(self, host: str) -> bool:
+        if not self.hosts_allow:
+            return True
+        if self.lenient:
+            return lenient_host(host.lower()) in self._lenient_hosts_allow
+        return host.lower() in self.hosts_allow
+
+    def _host_denied(self, host: str) -> bool:
+        if not self.hosts_deny:
+            return False
+        if self.lenient:
+            return lenient_host(host.lower()) in self._lenient_hosts_deny
+        return host.lower() in self.hosts_deny
+
+    def _scheme_allowed(self, scheme: str) -> bool:
+        if not self.schemes_allow:
+            return True
+        return scheme.lower() in self.schemes_allow
+
+    def _scheme_denied(self, scheme: str) -> bool:
+        if not self.schemes_deny:
+            return False
+        return scheme.lower() in self.schemes_deny
+
+    def _extension_allowed(self, extension: str) -> bool:
+        if not self.extensions_allow:
+            return True
+        return bool(extension) and extension in self.extensions_allow
+
+    def _extension_denied(self, extension: str) -> bool:
+        if not self.extensions_deny:
+            return False
+        return bool(extension) and extension in self.extensions_deny
+
+    def _regex_allowed(self, url: str) -> bool:
+        if not self.regexps_allow:
+            return True
+        return any(r.search(url) for r in self.regexps_allow)
+
+    def _regex_denied(self, url: str) -> bool:
+        if not self.regexps_deny:
+            return False
+        return any(r.search(url) for r in self.regexps_deny)
+
+    def allowed(self, url: str) -> bool:
+        """Return whether ``url`` passes every configured filter."""
+        if not isinstance(url, str):
+            raise TypeError(f"Expected str URL, got {type(url).__name__}")
+
+        parts = urlparse(url)
+        host = parts.hostname
+        scheme = parts.scheme
+        if not host or not scheme:
+            return False
+
+        if not self._scheme_allowed(scheme):
+            return False
+        if self._scheme_denied(scheme):
+            return False
+
+        if not self._host_allowed(host):
+            return False
+        if self._host_denied(host):
+            return False
+
+        extension = _extension_of(parts.path)
+        if not self._extension_allowed(extension):
+            return False
+        if self._extension_denied(extension):
+            return False
+
+        if not self._regex_allowed(url):
+            return False
+        if self._regex_denied(url):
+            return False
+
+        return True
+
+
 def extract_and_filter_links(
     html,
     *,
@@ -236,121 +366,37 @@ def extract_and_filter_links(
     hosts_deny: list[str] = None,
     schemes_allow: list[str] = None,
     schemes_deny: list[str] = None,
+    lenient: bool = False,
     link_process_func: Callable[[Link], Link] = None,
     unique: bool = True,
 ) -> list[Link]:
-    extensions_deny = [_.lower() for _ in set(args_to_list(extensions_deny))]
-    extensions_allow = [_.lower() for _ in set(args_to_list(extensions_allow))]
-
-    hosts_allow = [_.lower() for _ in set(args_to_list(hosts_allow))]
-    hosts_deny = [_.lower() for _ in set(args_to_list(hosts_deny))]
-
-    schemes_allow = [_.lower() for _ in set(args_to_list(schemes_allow))]
-    schemes_deny = [_.lower() for _ in set(args_to_list(schemes_deny))]
-
+    link_filter = _LinkFilter(
+        extensions_deny=extensions_deny,
+        extensions_allow=extensions_allow,
+        hosts_allow=hosts_allow,
+        hosts_deny=hosts_deny,
+        schemes_allow=schemes_allow,
+        schemes_deny=schemes_deny,
+        lenient=lenient,
+    )
     link_process_func = link_process_func or (lambda x: x)
 
-    def _extension_allowed(extension: str) -> bool:
-        if not extension:
-            return False
-        if extensions_allow:
-            return extension.lower() in extensions_allow
-        else:
-            return True
-
-    def _extension_denied(extension: str) -> bool:
-        if not extension:
-            return False
-        if extensions_deny:
-            return extension.lower() in extensions_deny
-        else:
-            return False
-
-    def _host_allowed(host: str) -> bool:
-        if hosts_allow:
-            return host.lower() in hosts_allow
-        else:
-            return True
-
-    def _host_allowed_lenient(host: str) -> bool:
-        if hosts_allow:
-            hosts = [lenient_host(_) for _ in hosts_allow]
-            return lenient_host(host.lower()) in hosts
-        else:
-            return False
-
-    def _host_denied(host: str) -> bool:
-        if hosts_deny:
-            return host.lower() in hosts_deny
-        else:
-            return False
-
-    def _host_denied_lenient(host: str) -> bool:
-        if hosts_deny:
-            hosts = [lenient_host(_) for _ in hosts_deny]
-            return lenient_host(host.lower()) in hosts
-        else:
-            return False
-
-    def _scheme_allowed(scheme: str) -> bool:
-        if schemes_allow:
-            return scheme.lower() in schemes_allow
-        else:
-            return True
-
-    def _scheme_denied(scheme: str) -> bool:
-        if schemes_allow:
-            return scheme.lower() in schemes_deny
-        else:
-            return False
-
-    def _link_allowed(link: Link) -> bool:
+    links = []
+    for link in extract_links(
+        html,
+        selector=selector,
+        xpath=xpath,
+        tags=tags,
+        attr=attr,
+        base_url=base_url,
+    ):
+        if not link_filter.allowed(_canonical_url(link.url)):
+            continue
+        link = link_process_func(link)
         if normalize:
-            link = normalize_url(link.url)
+            link = Link(_canonical_url(link.url), unique=link.unique)
+        links.append(link)
 
-        parts = urlparse(link)
-        host = parts.hostname
-        ext = parts.path.rsplit(".")[-1]
-        scheme = parts.scheme
-
-        if not host:
-            return False
-        if not scheme:
-            return False
-
-        if not _scheme_allowed(scheme):
-            return False
-        if _scheme_denied(scheme):
-            return False
-
-        if not _host_allowed(host):
-            return False
-        if not _host_allowed_lenient(host):
-            return False
-        if _host_denied(host):
-            return False
-        if _host_denied_lenient(host):
-            return False
-
-        if not _extension_allowed(ext):
-            return False
-        if _extension_denied(ext):
-            return False
-
-        return True
-
-    links = [
-        link_process_func(link)
-        for link in extract_links(
-            html,
-            selector=selector,
-            xpath=xpath,
-            tags=tags,
-            attr=attr,
-            base_url=base_url,
-        )
-        if _link_allowed(link)
-    ]
     if unique:
         return list(set(links))
     else:
@@ -788,6 +834,18 @@ class FilteringLinkExtractor(BaseExtractor):
         super(FilteringLinkExtractor, self).__init__()
         self.normalize = normalize
 
+        self._filter = _LinkFilter(
+            extensions_deny=extensions_deny,
+            extensions_allow=extensions_allow,
+            hosts_allow=hosts_allow,
+            hosts_deny=hosts_deny,
+            schemes_allow=schemes_allow,
+            schemes_deny=schemes_deny,
+            regexps_allow=regexps_allow,
+            regexps_deny=regexps_deny,
+            lenient=lenient,
+        )
+
         self.extensions_deny = [_.lower() for _ in set(args_to_list(extensions_deny))]
         self.extensions_allow = [_.lower() for _ in set(args_to_list(extensions_allow))]
 
@@ -820,114 +878,11 @@ class FilteringLinkExtractor(BaseExtractor):
         self.link_process_func = link_process_func or (lambda x: x)
         self.logger = get_logger(self.__class__.__name__, log_level=log_level)
 
-    def _extension_allowed(self, extension: str) -> bool:
-        if self.extensions_allow:
-            if not extension:
-                return False
-            return extension.lower() in self.extensions_allow
-        else:
-            return True
-
-    def _extension_denied(self, extension: str) -> bool:
-        if not extension:
-            return False
-        if self.extensions_deny:
-            return extension.lower() in self.extensions_deny
-        else:
-            return False
-
-    def _host_allowed(self, host: str) -> bool:
-        if self.hosts_allow:
-            return host.lower() in self.hosts_allow
-        else:
-            return True
-
-    def _host_allowed_lenient(self, host: str) -> bool:
-        if self.hosts_allow:
-            hosts = [lenient_host(_) for _ in self.hosts_allow]
-            return lenient_host(host.lower()) in hosts
-        else:
-            return False
-
-    def _host_denied(self, host: str) -> bool:
-        if self.hosts_deny:
-            return host.lower() in self.hosts_deny
-        else:
-            return False
-
-    def _host_denied_lenient(self, host: str) -> bool:
-        if self.hosts_deny:
-            hosts = [lenient_host(_) for _ in self.hosts_deny]
-            return lenient_host(host.lower()) in hosts
-        else:
-            return False
-
-    def _scheme_allowed(self, scheme: str) -> bool:
-        if self.schemes_allow:
-            return scheme.lower() in self.schemes_allow
-        else:
-            return True
-
-    def _scheme_denied(self, scheme: str) -> bool:
-        if self.schemes_deny:
-            return scheme.lower() in self.schemes_deny
-        else:
-            return False
-
-    def _regex_allowed(self, url: str) -> bool:
-        if self.regexps_allow:
-            return any(r.search(url) for r in self.regexps_allow)
-        else:
-            return True
-
-    def _regex_denied(self, url: str) -> bool:
-        if self.regexps_deny:
-            return any(r.search(url) for r in self.regexps_deny)
-        else:
-            return False
-
     def link_allowed(self, link: Link) -> bool:
-        if self.normalize:
-            link = normalize_url(link.url)
-
-        parts = urlparse(link)
-        host = parts.hostname
-        ext = parts.path.rsplit(".")[-1]
-        scheme = parts.scheme
-        self.logger.debug(f"{link} {ext}")
-
-        if not host:
-            return False
-        if not scheme:
-            return False
-
-        if not self._scheme_allowed(scheme):
-            return False
-        if self._scheme_denied(scheme):
-            return False
-
-        if not self.lenient:
-            if not self._host_allowed(host):
-                return False
-            if self._host_denied(host):
-                return False
-        else:
-            if not self._host_allowed_lenient(host):
-                return False
-            if self._host_denied_lenient(host):
-                return False
-
-        if not self._extension_allowed(ext):
-            return False
-        if self._extension_denied(ext):
-            return False
-
-        if not self._regex_allowed(link):
-            return False
-        if self._regex_denied(link):
-            return False
-
-        return True
+        url = _canonical_url(link.url)
+        allowed = self._filter.allowed(url)
+        self.logger.debug(f"{url} allowed={allowed}")
+        return allowed
 
     def extract(
         self,
@@ -942,11 +897,16 @@ class FilteringLinkExtractor(BaseExtractor):
 
         links = self.link_extractor.extract(html)
         self.logger.debug(f"origin: {links}")
-        links = [
-            self.link_process_func(link) for link in links if self.link_allowed(link)
-        ]
-        self.logger.debug(f"filtered: {links}")
-        return links
+        filtered = []
+        for link in links:
+            if not self.link_allowed(link):
+                continue
+            link = self.link_process_func(link)
+            if self.normalize:
+                link = Link(_canonical_url(link.url), unique=link.unique)
+            filtered.append(link)
+        self.logger.debug(f"filtered: {filtered}")
+        return filtered
 
 
 class RegexExtractor(BaseExtractor):

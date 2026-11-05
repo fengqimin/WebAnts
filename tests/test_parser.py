@@ -1,7 +1,11 @@
+import gc
+import weakref
+
 import pytest
 from lxml import etree
-from webants.parser import Parser
+
 from webants.libs.exceptions import ParserError
+from webants.parser import Parser
 
 
 @pytest.fixture
@@ -103,12 +107,15 @@ def test_parser_stats(parser, sample_html):
 
     stats = parser.get_stats()
     assert stats["total_parses"] == 1
-    assert stats["cache_hits"] == 1
+    assert stats["cache_hits"] == 0
+    assert stats["cache_misses"] == 1
     assert stats["parse_errors"] == 0
     assert stats["encoding_errors"] == 0
     assert stats["size_errors"] == 0
-    assert stats["css_cache_hits"] == 1
-    assert stats["xpath_cache_hits"] == 1
+    assert stats["css_cache_hits"] == 0
+    assert stats["css_cache_misses"] == 1
+    assert stats["xpath_cache_hits"] == 0
+    assert stats["xpath_cache_misses"] == 1
     assert stats["total_css_queries"] == 1
     assert stats["total_xpath_queries"] == 1
 
@@ -117,36 +124,74 @@ def test_parser_advanced_caching(parser, sample_html):
     """Test advanced caching mechanism."""
 
     # Test cache limit
-    parser._cached_parse.cache_clear()  # Clear cache
-    for _ in range(parser._cached_parse.cache_info().maxsize + 1):
+    parser.clear_caches()
+    maxsize = parser.get_stats()["cache_info"]["maxsize"]
+    for i in range(maxsize + 1):
         html = f""""
                 <html>
                     <head><title>Test Page</title></head>
                     <body>
                         <div class="content">
                             <a href="http://example.com">Example Link</a>
-                            <p class="text">Sample Text{_}</p>
+                            <p class="text">Sample Text{i}</p>
                         </div>
                     </body>
                 </html>
                 """
         parser.parse(html)
-    assert (
-        parser._cached_parse.cache_info().currsize
-        == parser._cached_parse.cache_info().maxsize
-    )
+    assert parser.get_stats()["cache_info"]["currsize"] == maxsize
 
     parser.parse(sample_html)
-    assert (
-        parser._cached_parse.cache_info().currsize
-        == parser._cached_parse.cache_info().maxsize
-    )
+    assert parser.get_stats()["cache_info"]["currsize"] == maxsize
 
     # Test cache eviction
-    parser.clear_caches()  # Clear cache
-    for _ in range(parser._cached_parse.cache_info().maxsize + 1):
+    parser.clear_caches()
+    for _ in range(maxsize + 1):
         parser.parse(sample_html)
-    assert parser._cached_parse.cache_info().currsize == 1
+    assert parser.get_stats()["cache_info"]["currsize"] == 1
+
+
+def test_parser_cache_hit_statistics(parser):
+    parser.parse("<html><body>cached</body></html>")
+    parser.parse("<html><body>cached</body></html>")
+
+    stats = parser.get_stats()
+    assert stats["cache_misses"] == 1
+    assert stats["cache_hits"] == 1
+    assert stats["cache_info"]["hits"] == 1
+    assert stats["cache_info"]["misses"] == 1
+
+
+def test_parser_cache_returns_independent_trees(parser):
+    first = parser.parse("<html><body><p>x</p></body></html>")
+    first.find(".//p").text = "MUTATED"
+
+    second = parser.parse("<html><body><p>x</p></body></html>")
+    assert second is not first
+    assert second.find(".//p").text == "x"
+
+
+def test_parser_instance_is_collectable():
+    """P1-07: the cache must not retain the Parser instance."""
+    parser = Parser()
+    parser.parse("<html><body>leak</body></html>")
+    ref = weakref.ref(parser)
+
+    del parser
+    gc.collect()
+
+    assert ref() is None
+
+
+def test_parser_cache_size_zero_disables_cache():
+    parser = Parser(cache_size=0)
+    parser.parse("<html><body>x</body></html>")
+    parser.parse("<html><body>x</body></html>")
+
+    stats = parser.get_stats()
+    assert stats["cache_hits"] == 0
+    assert stats["cache_misses"] == 2
+    assert stats["cache_info"]["currsize"] == 0
 
 
 def test_extract(parser, sample_html):

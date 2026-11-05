@@ -7,13 +7,14 @@ This module provides configuration management with:
 - Default configuration profiles
 """
 
+import copy
 import os
-import yaml
 from pathlib import Path
-from typing import Any, Dict, Optional, Union
+from typing import Any, Optional, Union
+
+import yaml
 
 from webants.utils.logger import get_logger
-
 
 DEFAULT_CONFIG = {
     "downloader": {
@@ -89,7 +90,7 @@ class Config:
             env_prefix: Prefix for environment variables
         """
         self.logger = get_logger(self.__class__.__name__)
-        self._config = DEFAULT_CONFIG.copy()
+        self._config = copy.deepcopy(DEFAULT_CONFIG)
         self._env_prefix = env_prefix
         
         if config_path:
@@ -120,82 +121,162 @@ class Config:
             self.logger.error(f"Error loading config file: {str(e)}")
             
     def _load_env_vars(self) -> None:
-        """Load configuration from environment variables."""
+        """Load configuration from environment variables.
+
+        Nested keys use a double-underscore separator:
+        ``WEBANTS_DOWNLOADER__CONCURRENT_REQUESTS`` sets
+        ``downloader.concurrent_requests``. Single underscores are part of the
+        key name.
+        """
         for key, value in os.environ.items():
-            if key.startswith(self._env_prefix):
-                config_key = key[len(self._env_prefix):].lower()
-                self._set_nested_value(config_key, value)
-                
-    def _set_nested_value(self, key: str, value: str) -> None:
-        """Set nested configuration value from flat key.
-        
+            if not key.startswith(self._env_prefix):
+                continue
+
+            config_key = key[len(self._env_prefix):].lower()
+            parts = config_key.split("__")
+            if not config_key or any(not part for part in parts):
+                self.logger.warning(f"Ignoring malformed environment override: {key}")
+                continue
+            if parts[0] not in self._config:
+                self.logger.warning(f"Ignoring unknown environment override: {key}")
+                continue
+
+            self._set_nested_value(".".join(parts), value, from_env=True)
+
+    def _set_nested_value(self, key: str, value: Any, *, from_env: bool = False) -> bool:
+        """Set a nested configuration value from a flat key.
+
         Args:
             key: Dot-separated configuration key
             value: Configuration value
+            from_env: Whether the value comes from an environment variable.
+                Environment values are coerced and type-checked against the
+                current value; mismatches are ignored with a warning.
+
+        Returns:
+            Whether the value was written.
         """
-        parts = key.split(".")
+        parts = [part for part in key.split(".") if part]
+        if not parts:
+            return False
+
         current = self._config
-        
         for part in parts[:-1]:
-            if part not in current:
-                current[part] = {}
-            current = current[part]
-            
-        # Convert value to appropriate type
+            node = current.get(part)
+            if not isinstance(node, dict):
+                if from_env:
+                    self.logger.warning(
+                        f"Ignoring environment override {key!r}: "
+                        f"{part!r} is not a section"
+                    )
+                    return False
+                node = {}
+                current[part] = node
+            current = node
+
+        last = parts[-1]
+        if from_env:
+            if last not in current:
+                self.logger.warning(f"Ignoring unknown environment override: {key}")
+                return False
+            coerced = self._coerce_scalar(value)
+            if not self._types_match(current[last], coerced):
+                self.logger.warning(
+                    f"Ignoring environment override {key!r}: expected "
+                    f"{type(current[last]).__name__}, got {type(coerced).__name__}"
+                )
+                return False
+            current[last] = coerced
+        else:
+            current[last] = value
+        return True
+
+    @staticmethod
+    def _coerce_scalar(value: str) -> Any:
+        """Convert an environment string to bool/int/float when possible."""
+        lowered = value.strip().lower()
+        if lowered in ("true", "false"):
+            return lowered == "true"
         try:
-            if value.lower() in ("true", "false"):
-                value = value.lower() == "true"
-            elif value.isdigit():
-                value = int(value)
-            elif value.replace(".", "").isdigit():
-                value = float(value)
-        except (ValueError, AttributeError):
+            return int(value)
+        except ValueError:
             pass
-            
-        current[parts[-1]] = value
+        try:
+            return float(value)
+        except ValueError:
+            pass
+        return value
+
+    @staticmethod
+    def _types_match(existing: Any, value: Any) -> bool:
+        """Return whether ``value`` can replace ``existing`` without a type error."""
+        if isinstance(existing, bool):
+            return isinstance(value, bool)
+        if isinstance(existing, (int, float)):
+            return isinstance(value, (int, float)) and not isinstance(value, bool)
+        if existing is None:
+            return True
+        return isinstance(value, type(existing))
         
+    def _deep_merge(self, base: dict, patch: dict) -> None:
+        """Recursively merge ``patch`` into the ``base`` mapping."""
+        for key, value in patch.items():
+            if isinstance(value, dict) and isinstance(base.get(key), dict):
+                self._deep_merge(base[key], value)
+            else:
+                base[key] = copy.deepcopy(value)
+
     def _merge_config(self, config: dict) -> None:
-        """Recursively merge configuration dictionaries.
-        
+        """Recursively merge configuration dictionaries into the current config.
+
         Args:
             config: Configuration to merge
         """
-        for key, value in config.items():
-            if (
-                key in self._config
-                and isinstance(self._config[key], dict)
-                and isinstance(value, dict)
-            ):
-                self._merge_config(value)
-            else:
-                self._config[key] = value
-                
+        self._deep_merge(self._config, config)
+
     def _validate_config(self) -> None:
         """Validate configuration values."""
-        # Validate concurrent requests
-        if self._config["downloader"]["concurrent_requests"] < 1:
-            self.logger.warning("concurrent_requests must be >= 1, using default")
-            self._config["downloader"]["concurrent_requests"] = DEFAULT_CONFIG["downloader"]["concurrent_requests"]
-            
-        # Validate timeouts
-        if self._config["downloader"]["request_timeout"] < 0:
-            self.logger.warning("request_timeout must be >= 0, using default")
-            self._config["downloader"]["request_timeout"] = DEFAULT_CONFIG["downloader"]["request_timeout"]
-            
-        # Validate delays
-        if self._config["scheduler"]["request_delay"] < 0:
-            self.logger.warning("request_delay must be >= 0, using default")
-            self._config["scheduler"]["request_delay"] = DEFAULT_CONFIG["scheduler"]["request_delay"]
-            
-        if self._config["scheduler"]["domain_delay"] < 0:
-            self.logger.warning("domain_delay must be >= 0, using default")
-            self._config["scheduler"]["domain_delay"] = DEFAULT_CONFIG["scheduler"]["domain_delay"]
-            
+        self._validate_number(
+            "downloader.concurrent_requests",
+            1,
+            DEFAULT_CONFIG["downloader"]["concurrent_requests"],
+        )
+        self._validate_number(
+            "downloader.request_timeout",
+            0,
+            DEFAULT_CONFIG["downloader"]["request_timeout"],
+        )
+        self._validate_number(
+            "scheduler.request_delay",
+            0,
+            DEFAULT_CONFIG["scheduler"]["request_delay"],
+        )
+        self._validate_number(
+            "scheduler.domain_delay",
+            0,
+            DEFAULT_CONFIG["scheduler"]["domain_delay"],
+        )
+
         # Validate storage path
-        storage_path = Path(self._config["storage"]["base_path"])
-        if not storage_path.is_absolute():
-            storage_path = Path.cwd() / storage_path
-        self._config["storage"]["base_path"] = str(storage_path)
+        storage_path = self.get("storage.base_path")
+        if not isinstance(storage_path, str):
+            self.logger.warning("base_path must be a string, using default")
+            storage_path = DEFAULT_CONFIG["storage"]["base_path"]
+        path = Path(storage_path)
+        if not path.is_absolute():
+            path = Path.cwd() / path
+        self._set_nested_value("storage.base_path", str(path))
+
+    def _validate_number(self, key: str, minimum: float, default: Any) -> None:
+        """Validate a numeric setting, falling back to ``default``."""
+        value = self.get(key)
+        if not isinstance(value, (int, float)) or isinstance(value, bool):
+            self.logger.warning(f"{key} must be a number, using default")
+            self._set_nested_value(key, default)
+            return
+        if value < minimum:
+            self.logger.warning(f"{key} must be >= {minimum}, using default")
+            self._set_nested_value(key, default)
         
     def get(self, key: str, default: Any = None) -> Any:
         """Get configuration value.
@@ -232,7 +313,7 @@ class Config:
         Returns:
             Configuration dictionary
         """
-        return self._config.copy()
+        return copy.deepcopy(self._config)
         
     def save(self, path: Union[str, Path]) -> None:
         """Save configuration to YAML file.

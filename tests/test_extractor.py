@@ -1,20 +1,22 @@
 import pytest
 from lxml import etree
+
 from webants.libs.extractor import (
-    Link,
+    AttribExtractor,
+    ElementExtractor,
     ExtractorFactory,
+    FilteringLinkExtractor,
+    Link,
     LinkExtractor,
     TextExtractor,
-    ElementExtractor,
-    AttribExtractor,
-    FilteringLinkExtractor,
-    iter_elements,
-    find_elements,
+    extract_and_filter_links,
     extract_attrib,
     extract_links,
     extract_text,
+    find_elements,
     get_base_url,
     get_html_title,
+    iter_elements,
 )
 
 
@@ -231,4 +233,80 @@ def test_link_variations(url, unique, expected):
     link = Link(url, unique=unique)
     assert link.url == expected
     assert link.unique is unique
+
+
+def test_module_filter_allows_links_without_allow_lists():
+    """P1-15: an empty configuration must not reject every link."""
+    links = extract_and_filter_links(
+        '<a href="/page1">Link</a>', base_url="http://example.com"
+    )
+    assert [link.url for link in links] == ["http://example.com/page1"]
+
+
+def test_filtering_link_extractor_normalize_false():
+    """P1-05: normalize=False must not pass a Link into urlparse."""
+    extractor = FilteringLinkExtractor(base_url="http://example.com", normalize=False)
+    links = extractor.extract('<a href="/page1">Link</a>')
+    assert [link.url for link in links] == ["http://example.com/page1"]
+
+
+def test_filtering_link_extractor_normalize_true_rewrites_output():
+    """P1-05: normalize=True must rewrite the returned Link, not just a local."""
+    extractor = FilteringLinkExtractor(base_url="http://example.com", normalize=True)
+    links = extractor.extract(
+        '<a href="HTTP://Example.COM:80/p?b=2&amp;a=1#frag">Link</a>'
+    )
+    assert [link.url for link in links] == ["http://Example.COM/p?a=1&b=2"]
+
+
+def test_module_filter_allows_root_url_without_extension():
+    """P1-16: a URL without a path must not be rejected by extension checks."""
+    links = extract_and_filter_links(
+        '<a href="http://example.com">Link</a>',
+        base_url="http://example.com",
+        hosts_allow=["example.com"],
+    )
+    assert len(links) == 1
+
+
+@pytest.mark.parametrize(
+    "hosts_allow,lenient,expected",
+    [
+        (None, False, True),
+        (None, True, True),
+        (["example.com"], False, False),
+        (["example.com"], True, True),
+    ],
+)
+def test_lenient_host_matrix(hosts_allow, lenient, expected):
+    """P1-17: lenient only changes comparison, never rejects an empty list."""
+    extractor = FilteringLinkExtractor(
+        base_url="http://www.example.com",
+        hosts_allow=hosts_allow,
+        lenient=lenient,
+        normalize=True,
+    )
+    links = extractor.extract('<a href="http://www.example.com/p">Link</a>')
+    assert bool(links) is expected
+
+
+def test_filtering_link_extractor_normalize_false_with_regexps():
+    """P1-05: regex filters must receive a URL string in both modes."""
+    extractor = FilteringLinkExtractor(
+        base_url="http://example.com",
+        normalize=False,
+        regexps_allow=[r"/page\d+"],
+    )
+    links = extractor.extract('<a href="/page1">A</a><a href="/other">B</a>')
+    assert [link.url for link in links] == ["http://example.com/page1"]
+
+
+def test_module_filter_scheme_deny_takes_effect():
+    """P2-03: module-level scheme deny must use schemes_deny, not schemes_allow."""
+    links = extract_and_filter_links(
+        '<a href="http://example.com/p">Link</a>',
+        base_url="http://example.com",
+        schemes_deny=["http"],
+    )
+    assert links == []
 
