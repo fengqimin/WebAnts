@@ -128,16 +128,16 @@
 | 符号 | 类型 | 位置 | 用途 | 调用方 |
 |------|------|------|------|--------|
 | `ExtractorDescriptor` | descriptor | `webants/libs/item.py:36` | 字段访问时执行提取 | `_Item.field` |
-| `_Item` | class | `:77` | 持有 `html` 的基类 | 四个 Item |
+| `_Item` | class | `:77` | 持有 `html` 的基类；setter 校验 `str`/`_Element`/`None` | 四个 Item |
 | `AttrItem` | class | `:90` | 属性提取 | 外部 |
 | `LinkItem` | class | `:106` | 链接提取 + 过滤 | 外部、示例 |
 | `ElementItem` | class | `:155` | 元素提取 | 外部 |
-| `TextItem` | class | `:171` | 文本提取 | 外部、测试 |
-| `ItemDescriptor` | descriptor | `:194` | 类属性式提取 | 四个 Descriptor |
-| `AttrItemDescriptor` | descriptor | `:221` | 属性字段声明 | 外部 |
-| `LinkItemDescriptor` | descriptor | `:235` | 链接字段声明 | `example/use_item.py` |
-| `ElementItemDescriptor` | descriptor | `:281` | 元素字段声明 | 外部 |
-| `TextItemDescriptor` | descriptor | `:295` | 文本字段声明 | `example/use_item.py` |
+| `TextItem` | class | `:187` | 文本提取 | 外部、测试 |
+| `ItemDescriptor` | descriptor | `:210` | 类属性式提取 | 四个 Descriptor |
+| `AttrItemDescriptor` | descriptor | `:237` | 属性字段声明 | 外部 |
+| `LinkItemDescriptor` | descriptor | `:251` | 链接字段声明 | `example/use_item.py` |
+| `ElementItemDescriptor` | descriptor | `:297` | 元素字段声明 | 外部 |
+| `TextItemDescriptor` | descriptor | `:311` | 文本字段声明 | `example/use_item.py` |
 
 ## 9.8 `webants/libs/extractor.py`
 
@@ -264,11 +264,11 @@
 | `tests/test_request.py` | 9 | 回调双类型、errback、`cb_kwargs` 校验 | 覆盖 C1 契约 |
 | `tests/test_spider.py` | 24 | 主链路、异步生成器/协程回调、errback、下载失败、关闭/取消/`idle_grace` | 覆盖 C3/C6 与 ADR-0003 E1–E5，全部离线 |
 | `tests/test_extractor.py` | 20（含参数化） | 函数式提取、四类 Extractor、工厂、Link 变体 | 覆盖 `FilteringLinkExtractor` 默认 normalize |
-| `tests/test_item.py` | 6 | 四类 Item + 四类 Descriptor | `test_invalid_html` 仍失败（P1-12） |
+| `tests/test_item.py` | 6 | 四类 Item + 四类 Descriptor；`html` 类型校验 | 非法类型抛 `TypeError` |
 | `tests/test_parser.py` | 18（含参数化） | 解析、选择器、缓存、错误 | 覆盖编码/超限/空内容 |
 | `tests/test_result.py` | 13 | `Field` / `Result` | 覆盖校验与序列化 |
 | `tests/test_scheduler.py` | 20 | 初始化、去重、上限、并发、完成、统计、延迟、slot 对账 | 域名并发用 `asyncio.wait` |
 | `tests/conftest.py` | — | `http_client`、`sample_html` fixture | 将仓库根加入 `sys.path` |
 | `example/use_item.py` | — | `LinkItemDescriptor` / `TextItemDescriptor` | import 即执行 |
 
-合计 124 个测试用例（`uv run pytest -q` 报告 123 passed + 1 failed；失败为已知的 `tests/test_item.py::test_invalid_html`，对应 P1-12）。
+合计 124 个测试用例（`uv run pytest -q` 报告 `124 passed`）。

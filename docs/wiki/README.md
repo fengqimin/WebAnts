@@ -6,7 +6,7 @@
 | 生成日期 | 2026-11-03；2026-11-05 同步 |
 | 文档范围 | `webants/`（全部 Python 源码）、`tests/`、`pyproject.toml`、`setup.py`、`requirements.txt`、`readme*.md`、`docs/architecture.md`、`example/use_item.py` |
 | 数据快照 | 仓库内无 SQLite 数据库文件；仅 `data/html/awesome-python.html`（约 152 KB 样例 HTML），未做行数统计 |
-| 运行验证 | `uv run pytest -q` → 1 failed, 123 passed（2026-11-05）；`uv run ruff check .` → 17 errors（全部既有 F401）；`uv run python -m isort --check-only .` → 17 个文件不合格、2 个跳过；`uv run black --check .` → 不可用；问题与修复状态见 [08](08-issues-and-recommendations.md) |
+| 运行验证 | `uv run pytest -q` → 124 passed（2026-11-05）；`uv run ruff check .` → 17 errors（全部既有 F401）；`uv run python -m isort --check-only .` → 17 个文件不合格、2 个跳过；`uv run black --check .` → 不可用；问题与修复状态见 [08](08-issues-and-recommendations.md) |
 
 ## 这个项目是什么
 
@@ -78,7 +78,7 @@ WebAnts 是一个用 `httpx` + `lxml` 实现的异步爬虫框架。它把爬取
 # 安装依赖（本次未执行，标注为未验证）
 uv sync
 
-# 运行测试（已验证：1 failed, 123 passed）
+# 运行测试（已验证：124 passed）
 uv run pytest -q
 
 # 只跑某个测试文件

@@ -109,7 +109,7 @@ flowchart TD
 
 | 命令 | 结果 | 说明 |
 |------|------|------|
-| `uv run pytest -q` | **1 failed, 123 passed** | 失败用例仍为 `tests/test_item.py::test_invalid_html`（P1-12） |
+| `uv run pytest -q` | **124 passed** | 无失败用例 |
 | `uv run ruff check .` | **Found 17 errors**，全部为 `F401` 未使用导入 | 分布：`example/use_item.py` 7 处、`tests/test_item.py` 1 处、`webants/libs/config.py` 1 处、`middleware.py` 2 处、`signals.py` 3 处、`statistic.py` 3 处 |
 | `uv run isort --check .` | **无法运行**（`Failed to canonicalize script path`） | 改用 `uv run python -m isort --check-only .`：17 个文件不合格、2 个跳过 |
 | `uv run black --check .` | 无法运行 | `Failed to canonicalize script path`，black 未安装/未声明 |

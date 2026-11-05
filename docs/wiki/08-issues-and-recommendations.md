@@ -28,7 +28,7 @@
 
 | 验证项 | 命令 / 脚本 | 实际结果 |
 |--------|-------------|----------|
-| 测试套件 | `uv run pytest -q` | `1 failed, 123 passed`；失败仍为 `tests/test_item.py::test_invalid_html`（P1-12） |
+| 测试套件 | `uv run pytest -q` | `124 passed`，无失败用例 |
 | Lint | `uv run ruff check .` | `Found 17 errors`，全部 `F401` |
 | 导入排序 | `uv run isort --check .` / `uv run python -m isort --check-only .` | CLI 入口报 `Failed to canonicalize script path`；改用模块方式后 **17 个文件不合格，2 个跳过** |
 | 格式检查 | `uv run black --check .` | `Failed to canonicalize script path`，无法运行；且 `dev` 依赖组未声明 black |
@@ -393,6 +393,8 @@ grep 结果显示，除 `libs/middleware.py:25` 引用 `libs/signals.py` 外，�
 
 **建议**：删除或改写失败用例（若要保留校验，应在 `_Item` 上增加 `html` 描述符）；为 Spider 增加 mock 测试；把网络用例标记为 `integration` 并默认跳过。
 
+**落地（2026-11-05）**：采用“保留校验”方案——`_Item.html` 改为 property，只接受 `str` / `etree._Element` / `None`（构造期允许 `None`），非法类型抛 `TypeError`（不用 `assert`，避免 `python -O` 失效）；`test_invalid_html` 同步改为断言 `TypeError`，并补充字符串与 lxml 元素两种合法输入。Spider 与 Downloader 的离线用例已在前序阶段补齐，`uv run pytest -q` 现为 `124 passed`。
+
 ### P1-13 body/cookies 未发送
 
 `_fetch` 只传 `method/url/headers/timeout`（`webants/downloader.py:224-229`），`Request.body`、`Request.cookies`、`Request.encoding`、`Request.referer` 完全没传给 httpx。POST/PUT 实际发送空体，需要登录态的请求也不会带 cookie。
@@ -636,10 +638,11 @@ await self.request_queue.put((request.priority, request))
 | P2-20 | **Closed** | `_inflight` 以 task 为键，同 URL 并发互不覆盖。`test_inflight_keeps_same_url_requests_distinct` |
 | P2-22 | **Closed** | `request_scheduled` 仅在真正入队后由 `_schedule` 发送。`test_scheduled_signal_fires_only_for_queued_requests` |
 | P2-23 | **Closed** | `close()` 与 `_running` 解耦、幂等、并发安全，未启动也释放 client。`test_close_before_start_releases_resources`、`test_close_is_idempotent_and_concurrent_safe` |
-| P1-05 / P1-06 / P1-07 / P1-08 / P1-09 / P1-10 / P1-11 / P1-12 / P1-15 / P1-16 / P1-17 | Open | 按 8.11 第 3–5 阶段推进 |
+| P1-12 | **Closed** | 修 `test_invalid_html`：`_Item.html` 增加类型校验（`str`/`etree._Element`/`None`，否则 `TypeError`），并补齐合法输入断言；主链路由 `tests/test_spider.py` 覆盖。`tests/test_item.py` 6 passed |
+| P1-05 / P1-06 / P1-07 / P1-08 / P1-09 / P1-10 / P1-11 / P1-15 / P1-16 / P1-17 | Open | 按 8.11 第 3–5 阶段推进 |
 | P2-02 ~ P2-19、P2-21 | Open | 按 8.11 第 3/5 阶段收口 |
 
-当前测试基线：`uv run pytest -q` → `1 failed, 123 passed`。唯一失败为 P1-12 的 `tests/test_item.py::test_invalid_html`，与本阶段无关；`tests/test_spider.py`、`tests/test_downloader.py`、`tests/test_request.py`、`tests/test_scheduler.py` 全部通过且不访问网络。`ruff check` 仍为 17 个 `F401`；`isort` 需用 `uv run python -m isort`（CLI 入口报 `Failed to canonicalize script path`）。
+当前测试基线：`uv run pytest -q` → `124 passed`。`tests/test_spider.py`、`tests/test_downloader.py`、`tests/test_request.py`、`tests/test_scheduler.py`、`tests/test_item.py` 全部通过且不访问网络。`ruff check` 仍为 17 个 `F401`；`isort` 需用 `uv run python -m isort`（CLI 入口报 `Failed to canonicalize script path`）。
 
 ## 附录 A 原版勘误表
 
