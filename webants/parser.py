@@ -126,9 +126,7 @@ class Parser:
                 self.logger.debug(f"Decoded content with encoding {encoding}")
             except UnicodeDecodeError as e:
                 self.stats["encoding_errors"] += 1
-                self.logger.warning(
-                    f"Encoding error: {str(e)}, trying to detect encoding..."
-                )
+                self.logger.warning(f"Encoding error: {str(e)}, trying to detect encoding...")
                 try:
                     # try chardet
                     if isinstance(content, bytes):
@@ -147,9 +145,7 @@ class Parser:
 
                 except ImportError:
                     self.logger.error("chardet not installed, cannot detect encoding")
-                    raise ParserError(
-                        "Failed to decode content and chardet not available"
-                    )
+                    raise ParserError("Failed to decode content and chardet not available")
 
         if len(content) > self.max_document_size:
             self.stats["size_errors"] += 1

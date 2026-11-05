@@ -23,10 +23,7 @@ from webants.libs.persister import JsonPersister, PersisterManager
 from webants.libs.result import Result
 from webants.spider import Spider
 
-DEMO_HTML = (
-    "<html><head><title>Demo</title></head>"
-    "<body><p>hello from WebAnts</p></body></html>"
-)
+DEMO_HTML = "<html><head><title>Demo</title></head><body><p>hello from WebAnts</p></body></html>"
 
 
 def demo_site(request: httpx.Request) -> httpx.Response:
@@ -66,9 +63,7 @@ async def main() -> None:
 
     # Offline demo: swap the real client for a mock transport.
     await spider.downloader.client.aclose()
-    spider.downloader.client = httpx.AsyncClient(
-        transport=httpx.MockTransport(demo_site)
-    )
+    spider.downloader.client = httpx.AsyncClient(transport=httpx.MockTransport(demo_site))
 
     # start() closes the spider on exit, which flushes and closes the persister.
     await spider.start()

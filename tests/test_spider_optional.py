@@ -26,9 +26,7 @@ def site_handler(request: httpx.Request) -> httpx.Response:
 async def offline_spider(spider: Spider, handler=site_handler):
     """Replace the downloader client with a MockTransport-backed client."""
     await spider.downloader.client.aclose()
-    spider.downloader.client = httpx.AsyncClient(
-        transport=httpx.MockTransport(handler)
-    )
+    spider.downloader.client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
     try:
         yield spider
     finally:
@@ -225,9 +223,7 @@ async def test_cache_hit_bypasses_downloader():
         return httpx.Response(200, text="network", request=request)
 
     async with offline_spider(spider, handler):
-        await run_request_chain(
-            spider, Request("http://example.com/a", callback=spider.parse)
-        )
+        await run_request_chain(spider, Request("http://example.com/a", callback=spider.parse))
 
     assert calls == []
     assert spider.stats["cache_hits"] == 1
@@ -247,9 +243,7 @@ async def test_middleware_filtered_request_releases_slot():
         return httpx.Response(200, request=request)
 
     async with offline_spider(spider, handler):
-        await run_request_chain(
-            spider, Request("http://example.com/a", callback=spider.parse)
-        )
+        await run_request_chain(spider, Request("http://example.com/a", callback=spider.parse))
 
     assert calls == []
     assert spider.stats["filtered_requests"] == 1
@@ -265,9 +259,7 @@ async def test_middleware_filtered_response_skips_callback():
     spider = SimpleSpider(middleware=middleware)
 
     async with offline_spider(spider):
-        await run_request_chain(
-            spider, Request("http://example.com/a", callback=spider.parse)
-        )
+        await run_request_chain(spider, Request("http://example.com/a", callback=spider.parse))
 
     assert spider.stats["filtered_responses"] == 1
     assert spider.stats["successful_requests"] == 0
@@ -382,9 +374,7 @@ async def test_results_are_persisted_and_flushed_on_close(tmp_path):
     spider = SimpleSpider(persister=manager)
 
     async with offline_spider(spider):
-        await run_request_chain(
-            spider, Request("http://example.com/a", callback=spider.parse)
-        )
+        await run_request_chain(spider, Request("http://example.com/a", callback=spider.parse))
 
     assert not (tmp_path / "results.json").exists()
 
@@ -402,9 +392,7 @@ async def test_persist_failure_does_not_fail_the_request(tmp_path):
     spider = SimpleSpider(persister=manager)
 
     async with offline_spider(spider):
-        await run_request_chain(
-            spider, Request("http://example.com/a", callback=spider.parse)
-        )
+        await run_request_chain(spider, Request("http://example.com/a", callback=spider.parse))
 
     assert spider.stats["successful_requests"] == 1
     assert spider.stats["failed_requests"] == 0
@@ -432,9 +420,7 @@ async def test_middleware_can_replace_the_request():
         return httpx.Response(200, request=request)
 
     async with offline_spider(spider, handler):
-        await run_request_chain(
-            spider, Request("http://example.com/a", callback=spider.parse)
-        )
+        await run_request_chain(spider, Request("http://example.com/a", callback=spider.parse))
 
     assert seen == ["http://example.com/a?from=middleware"]
     assert spider.seen_urls == ["http://example.com/a?from=middleware"]
@@ -513,9 +499,7 @@ async def test_assembly_with_config_middleware_and_persister(tmp_path):
         return httpx.Response(200, text="ok", request=request)
 
     async with offline_spider(spider, handler):
-        await run_request_chain(
-            spider, Request("http://example.com/a", callback=spider.parse)
-        )
+        await run_request_chain(spider, Request("http://example.com/a", callback=spider.parse))
         await run_request_chain(
             spider,
             Request(

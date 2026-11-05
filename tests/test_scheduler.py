@@ -142,9 +142,7 @@ async def test_request_completed(scheduler):
 
     scheduler.request_completed(request)
 
-    assert (
-        scheduler.domain_stats["example.com"]["active_requests"] == initial_active - 1
-    )
+    assert scheduler.domain_stats["example.com"]["active_requests"] == initial_active - 1
     assert scheduler.audit()["idle"] is True
     assert scheduler.stats["slot_mismatches"] == 0
 
@@ -184,9 +182,7 @@ async def test_cancel_during_domain_delay_restores_permits():
         max_domain_concurrent=2, domain_delay=5.0, max_queue_size=10, log_level=40
     )
     tasks = [
-        asyncio.create_task(
-            scheduler.schedule_request(Request(url=f"http://example.com/{index}"))
-        )
+        asyncio.create_task(scheduler.schedule_request(Request(url=f"http://example.com/{index}")))
         for index in range(2)
     ]
     await asyncio.sleep(0.05)
@@ -200,10 +196,7 @@ async def test_cancel_during_domain_delay_restores_permits():
     assert domain_stats["active_requests"] == 0
     assert scheduler.seen_urls == set()
     assert scheduler.stats["total_scheduled"] == 0
-    assert (
-        scheduler.domain_semaphores["example.com"]._value
-        == scheduler.max_domain_concurrent
-    )
+    assert scheduler.domain_semaphores["example.com"]._value == scheduler.max_domain_concurrent
     assert scheduler.audit()["idle"] is True
 
     # A later request must still be schedulable.
@@ -226,10 +219,7 @@ async def test_queue_full_returns_reason_without_leaking():
     # The rejected URL was never counted, so it can be scheduled again later.
     assert "http://example.com/2" not in scheduler.seen_urls
     assert scheduler.domain_stats["example.com"]["active_requests"] == 1
-    assert (
-        scheduler.domain_semaphores["example.com"]._value
-        == scheduler.max_domain_concurrent - 1
-    )
+    assert scheduler.domain_semaphores["example.com"]._value == scheduler.max_domain_concurrent - 1
     assert scheduler.audit()["balanced"] is True
 
 
@@ -240,9 +230,7 @@ async def test_pending_permit_keeps_audit_balanced():
         max_domain_concurrent=2, domain_delay=0.2, max_queue_size=10, log_level=40
     )
 
-    task = asyncio.create_task(
-        scheduler.schedule_request(Request(url="http://example.com/slow"))
-    )
+    task = asyncio.create_task(scheduler.schedule_request(Request(url="http://example.com/slow")))
     await asyncio.sleep(0.05)
 
     audit = scheduler.audit()
@@ -274,9 +262,7 @@ async def test_discard_pending_releases_queued_slots():
 @pytest.mark.asyncio
 async def test_two_slots_for_same_url_are_independent():
     """dont_filter duplicates each own a slot that releases separately"""
-    scheduler = Scheduler(
-        domain_delay=0, max_domain_concurrent=5, max_queue_size=10, log_level=40
-    )
+    scheduler = Scheduler(domain_delay=0, max_domain_concurrent=5, max_queue_size=10, log_level=40)
     first = await scheduler.schedule_request(Request(url="http://example.com/dup"))
     second = await scheduler.schedule_request(
         Request(url="http://example.com/dup", dont_filter=True)
@@ -299,9 +285,7 @@ async def test_concurrent_same_url_is_scheduled_once():
     )
     requests = [Request(url="http://example.com/dup") for _ in range(5)]
 
-    results = await asyncio.gather(
-        *(scheduler.schedule_request(request) for request in requests)
-    )
+    results = await asyncio.gather(*(scheduler.schedule_request(request) for request in requests))
 
     assert sum(1 for result in results if result) == 1
     assert sum(1 for result in results if result.reason is ScheduleReason.DUPLICATED) == 4
@@ -330,13 +314,9 @@ async def test_duplicate_filter_releases_reservation_after_rejection():
 @pytest.mark.asyncio
 async def test_cancel_while_waiting_for_permit_keeps_accounting_balanced():
     """Cancellation during acquire must not reserve or count anything"""
-    scheduler = Scheduler(
-        domain_delay=0, max_domain_concurrent=1, max_queue_size=10, log_level=40
-    )
+    scheduler = Scheduler(domain_delay=0, max_domain_concurrent=1, max_queue_size=10, log_level=40)
     first = await scheduler.schedule_request(Request(url="http://example.com/1"))
-    blocked = asyncio.create_task(
-        scheduler.schedule_request(Request(url="http://example.com/2"))
-    )
+    blocked = asyncio.create_task(scheduler.schedule_request(Request(url="http://example.com/2")))
 
     await asyncio.sleep(0.05)
     blocked.cancel()

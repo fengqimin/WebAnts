@@ -1,8 +1,9 @@
 import sys
 from pathlib import Path
-import pytest
+from typing import AsyncGenerator, LiteralString
+
 import httpx
-from typing import AsyncGenerator,LiteralString
+import pytest
 
 # Add project root to Python path
 root_dir = str(Path(__file__).parent.parent.resolve())
@@ -33,4 +34,3 @@ def sample_html() -> LiteralString:
         </body>
     </html>
     """
-

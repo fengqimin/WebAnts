@@ -2,8 +2,14 @@ import pytest
 from lxml import etree
 
 from webants.libs.item import (
-    AttrItem, LinkItem, ElementItem, TextItem,
-    AttrItemDescriptor, LinkItemDescriptor, ElementItemDescriptor, TextItemDescriptor
+    AttrItem,
+    AttrItemDescriptor,
+    ElementItem,
+    ElementItemDescriptor,
+    LinkItem,
+    LinkItemDescriptor,
+    TextItem,
+    TextItemDescriptor,
 )
 
 HTML_STR = """
@@ -18,14 +24,17 @@ HTML_STR = """
 </html>
 """
 
+
 @pytest.fixture
 def html():
     return HTML_STR
+
 
 def test_attr_item(html):
     item = AttrItem(attr="href", selector="a.link")
     item.html = html
     assert item.field == ["https://example.com"]
+
 
 def test_link_item(html):
     item = LinkItem(selector="a.link")
@@ -34,6 +43,7 @@ def test_link_item(html):
     assert len(links) == 1
     assert links[0].url == "https://example.com"
 
+
 def test_element_item(html):
     item = ElementItem(selector="p.text")
     item.html = html
@@ -41,10 +51,12 @@ def test_element_item(html):
     assert len(elements) == 1
     assert elements[0].text == "Sample text"
 
+
 def test_text_item(html):
     item = TextItem(selector="p.text")
     item.html = html
     assert item.field == ["Sample text"]
+
 
 class TestItem:
     attr_field = AttrItemDescriptor(attr="alt", selector="img")
@@ -56,8 +68,9 @@ class TestItem:
         self.html = html
         assert self.attr_field == ["Test image"]
         assert self.link_field[0].url == "https://example.com"
-        assert self.element_field[0].text == "Sample text" 
+        assert self.element_field[0].text == "Sample text"
         assert self.text_field == ["Sample text"]
+
 
 def test_invalid_html():
     item = TextItem(selector="p")

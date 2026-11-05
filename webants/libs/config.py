@@ -26,52 +26,45 @@ DEFAULT_CONFIG = {
         "default_headers": {
             "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
             "Accept-Language": "en",
-            "Accept-Encoding": "gzip, deflate"
-        }
+            "Accept-Encoding": "gzip, deflate",
+        },
     },
     "scheduler": {
         "max_requests": 0,  # 0 for unlimited
         "request_delay": 0,
         "domain_delay": 1,
         "max_domain_concurrent": 8,
-        "max_queue_size": 10000
+        "max_queue_size": 10000,
     },
     "parser": {
         "default_encoding": "utf-8",
         "max_document_size": 10485760,  # 10MB
-        "cache_size": 1000
+        "cache_size": 1000,
     },
     "spider": {
         "failure_threshold": 5,
         "recovery_timeout": 60.0,
         "circuit_breaker_enabled": True,
-        "retry_http_codes": [500, 502, 503, 504, 408, 429]
+        "retry_http_codes": [500, 502, 503, 504, 408, 429],
     },
     "storage": {
         "base_path": "data",
         "default_format": "json",
         "batch_size": 100,
         "formats": {
-            "json": {
-                "enabled": True,
-                "indent": 2,
-                "ensure_ascii": False
-            },
+            "json": {"enabled": True, "indent": 2, "ensure_ascii": False},
             "csv": {
                 "enabled": False,
                 "delimiter": ",",
             },
-            "sqlite": {
-                "enabled": False,
-                "table_name": "results"
-            }
-        }
+            "sqlite": {"enabled": False, "table_name": "results"},
+        },
     },
     "logging": {
         "level": "INFO",
         "format": "%(asctime)s [%(name)s] %(levelname)s: %(message)s",
-        "file": None
-    }
+        "file": None,
+    },
 }
 
 
@@ -79,12 +72,10 @@ class Config:
     """Configuration management with validation."""
 
     def __init__(
-        self,
-        config_path: Optional[Union[str, Path]] = None,
-        env_prefix: str = "WEBANTS_"
+        self, config_path: Optional[Union[str, Path]] = None, env_prefix: str = "WEBANTS_"
     ):
         """Initialize configuration.
-        
+
         Args:
             config_path: Path to YAML config file
             env_prefix: Prefix for environment variables
@@ -92,16 +83,16 @@ class Config:
         self.logger = get_logger(self.__class__.__name__)
         self._config = copy.deepcopy(DEFAULT_CONFIG)
         self._env_prefix = env_prefix
-        
+
         if config_path:
             self.load_config(config_path)
-            
+
         self._load_env_vars()
         self._validate_config()
-        
+
     def load_config(self, path: Union[str, Path]) -> None:
         """Load configuration from YAML file.
-        
+
         Args:
             path: Path to config file
         """
@@ -109,17 +100,17 @@ class Config:
         if not path.exists():
             self.logger.warning(f"Config file not found: {path}")
             return
-            
+
         try:
             with open(path, "r", encoding="utf-8") as f:
                 config = yaml.safe_load(f)
-                
+
             if config:
                 self._merge_config(config)
-                
+
         except Exception as e:
             self.logger.error(f"Error loading config file: {str(e)}")
-            
+
     def _load_env_vars(self) -> None:
         """Load configuration from environment variables.
 
@@ -132,7 +123,7 @@ class Config:
             if not key.startswith(self._env_prefix):
                 continue
 
-            config_key = key[len(self._env_prefix):].lower()
+            config_key = key[len(self._env_prefix) :].lower()
             parts = config_key.split("__")
             if not config_key or any(not part for part in parts):
                 self.logger.warning(f"Ignoring malformed environment override: {key}")
@@ -166,8 +157,7 @@ class Config:
             if not isinstance(node, dict):
                 if from_env:
                     self.logger.warning(
-                        f"Ignoring environment override {key!r}: "
-                        f"{part!r} is not a section"
+                        f"Ignoring environment override {key!r}: {part!r} is not a section"
                     )
                     return False
                 node = {}
@@ -217,7 +207,7 @@ class Config:
         if existing is None:
             return True
         return isinstance(value, type(existing))
-        
+
     def _deep_merge(self, base: dict, patch: dict) -> None:
         """Recursively merge ``patch`` into the ``base`` mapping."""
         for key, value in patch.items():
@@ -277,14 +267,14 @@ class Config:
         if value < minimum:
             self.logger.warning(f"{key} must be >= {minimum}, using default")
             self._set_nested_value(key, default)
-        
+
     def get(self, key: str, default: Any = None) -> Any:
         """Get configuration value.
-        
+
         Args:
             key: Dot-separated configuration key
             default: Default value if key not found
-            
+
         Returns:
             Configuration value
         """
@@ -296,43 +286,38 @@ class Config:
                 return default
             current = current[part]
         return current
-        
+
     def set(self, key: str, value: Any) -> None:
         """Set configuration value.
-        
+
         Args:
             key: Dot-separated configuration key
             value: Configuration value
         """
         self._set_nested_value(key, value)
         self._validate_config()
-        
+
     def as_dict(self) -> dict:
         """Get complete configuration dictionary.
-        
+
         Returns:
             Configuration dictionary
         """
         return copy.deepcopy(self._config)
-        
+
     def save(self, path: Union[str, Path]) -> None:
         """Save configuration to YAML file.
-        
+
         Args:
             path: Path to save config file
         """
         try:
             path = Path(path)
             path.parent.mkdir(parents=True, exist_ok=True)
-            
+
             with open(path, "w", encoding="utf-8") as f:
-                yaml.dump(
-                    self._config,
-                    f,
-                    default_flow_style=False,
-                    sort_keys=False
-                )
-                
+                yaml.dump(self._config, f, default_flow_style=False, sort_keys=False)
+
         except Exception as e:
             self.logger.error(f"Error saving config file: {str(e)}")
 

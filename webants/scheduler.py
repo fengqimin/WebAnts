@@ -46,9 +46,7 @@ class ScheduleSlot:
 
     __slots__ = ("_scheduler", "_request", "_domain", "_seq", "_released")
 
-    def __init__(
-        self, scheduler: "Scheduler", request: Request, domain: str, seq: int
-    ) -> None:
+    def __init__(self, scheduler: "Scheduler", request: Request, domain: str, seq: int) -> None:
         self._scheduler = scheduler
         self._request = request
         self._domain = domain
@@ -221,9 +219,7 @@ class Scheduler:
         if domain_stats["active_requests"] <= 0:
             # Something else already gave this permit back. Releasing again
             # would push the domain above its concurrency ceiling, so refuse.
-            self._record_mismatch(
-                f"active_requests already zero for domain: {slot.domain}"
-            )
+            self._record_mismatch(f"active_requests already zero for domain: {slot.domain}")
             return False
 
         domain_stats["active_requests"] -= 1
@@ -287,9 +283,7 @@ class Scheduler:
             return ScheduleResult(ScheduleReason.LIMIT_REACHED)
 
         reserved = not request.dont_filter
-        if reserved and (
-            request.url in self.seen_urls or request.url in self._reserved_urls
-        ):
+        if reserved and (request.url in self.seen_urls or request.url in self._reserved_urls):
             self.stats["total_filtered"] += 1
             return ScheduleResult(ScheduleReason.DUPLICATED)
 
@@ -319,14 +313,11 @@ class Scheduler:
             self._sequence += 1
             slot = ScheduleSlot(self, request, domain, self._sequence)
             try:
-                self.request_queue.put_nowait(
-                    (request.priority, slot.sequence, request, slot)
-                )
+                self.request_queue.put_nowait((request.priority, slot.sequence, request, slot))
             except asyncio.QueueFull:
                 self.stats["queue_full_count"] += 1
                 self.logger.warning(
-                    f"Queue full ({self.max_queue_size}), request not scheduled: "
-                    f"{request.url}"
+                    f"Queue full ({self.max_queue_size}), request not scheduled: {request.url}"
                 )
                 return ScheduleResult(ScheduleReason.QUEUE_FULL)
 
@@ -425,9 +416,7 @@ class Scheduler:
         domain = self._get_domain(request.url)
         domain_stats = self.domain_stats.get(domain)
         if domain_stats is None or domain_stats["active_requests"] <= 0:
-            self._record_mismatch(
-                f"request_completed for unscheduled request: {request.url}"
-            )
+            self._record_mismatch(f"request_completed for unscheduled request: {request.url}")
             return
 
         # Consume the registered slot so a later slot.release() cannot decrement

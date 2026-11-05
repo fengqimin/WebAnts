@@ -113,9 +113,7 @@ class RequestTimeout(RequestError):
 class TooManyRedirects(RequestError):
     """Too many redirects encountered."""
 
-    def __init__(
-        self, message: str = "Too many redirects", *, redirect_count: int, **kwargs
-    ):
+    def __init__(self, message: str = "Too many redirects", *, redirect_count: int, **kwargs):
         """Initialize redirect error.
 
         Args:
@@ -399,8 +397,7 @@ class ExceptionTracker:
                 **stats,
                 "rate": (
                     stats["count"] / (stats["last_seen"] - stats["first_seen"])
-                    if stats["first_seen"]
-                    and stats["last_seen"] > stats["first_seen"]
+                    if stats["first_seen"] and stats["last_seen"] > stats["first_seen"]
                     else 0
                 ),
             }
