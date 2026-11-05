@@ -233,4 +233,4 @@ flowchart TD
 | **解析缓存** | 实例级 `OrderedDict`（默认 1000 条）按内容 hash 缓存，每次返回深拷贝 + CSS/XPath 表达式缓存 | `parser.py:55,186,195` |
 | **信号系统** | 同步(Spider 内部) + 异步(全局 `signal_manager`)，两套并存 | `spider.py:24` / `libs/signals.py:27` |
 
-> ⚠️ **历史陷阱（已修正）**：`Downloader.get_stsats` 拼写错误已改为 `get_stats`；`exception_tracker` 全局实例已取消注释并强化 `track()` 以兼容普通 `Exception`；`pyyaml` 已加入 `pyproject.toml`/`setup.py` 依赖；`setup.py` 已对齐 `pyproject.toml`（httpx、Python>=3.12、版本 0.1.1）。剩余未声明依赖：`utils/statistic.py` 需要 `psutil`。详见 `AGENTS.md`。
+> ⚠️ **历史陷阱（已修正）**：`Downloader.get_stsats` 拼写错误已改为 `get_stats`；`exception_tracker` 全局实例已取消注释并强化 `track()` 以兼容普通 `Exception`；`pyyaml` 已加入 `pyproject.toml` 依赖；`setup.py` 与 `requirements.txt` 已按 ADR-0006 删除，构建与依赖以 `pyproject.toml` + `uv.lock` 为准；`psutil` 改为可选 extra `monitoring`，模块导入不再失败。详见 `AGENTS.md`。

@@ -7,7 +7,7 @@
 | Python | ≥ 3.12 | `pyproject.toml:6`；`.python-version` 为 `3.12` |
 | 解释器（本机） | 3.12.11 | `.venv/Scripts/python.exe --version` |
 | 包管理器 | `uv` | 本机 `uv 0.13.6` |
-| 操作系统 | 源码可跨平台；测试/示例含 Windows 惯例 | `setup.py:33` 标注 Windows |
+| 操作系统 | 源码可跨平台；测试/示例含 Windows 惯例 | `pyproject.toml` classifiers 标注 Windows |
 | 可选浏览器 | Playwright Chromium | `webants/utils/login.py:27,106`；仅在用登录工具时需要 |
 | 网络 | 可访问目标站点 | `tests/test_downloader.py:30` 会请求 `www.httpbin.org` |
 
@@ -19,27 +19,33 @@ cd E:\Repositories\Python\WebCrawler\WebAnts
 # 方式 A：uv（推荐，仓库有 uv.lock）
 uv sync
 
-# 方式 B：已有虚拟环境
-.venv\Scripts\python.exe -m pip install -r requirements.txt
+# 方式 B：已有虚拟环境（`requirements.txt` 已删除，ADR-0006）
+.venv\Scripts\python.exe -m pip install .
 
 # 可选：安装 Playwright 及浏览器
 uv sync --extra playwright
 uv run playwright install chromium
+
+# 可选：psutil 监控
+uv sync --extra monitoring
 ```
 
-> `uv sync` 与 `playwright install` 本次**未执行**（避免改动环境），标记为未验证。已验证的是现有 `.venv` 可导入 `pytest/httpx/lxml/pydantic/yaml`，且 `psutil` 缺失。
+> `requirements.txt` 与 `setup.py` 已按 ADR-0006 删除；安装与构建统一走 `pyproject.toml` + `uv.lock`。`psutil` 属可选 extra，不安装时核心模块仍可导入。
 
 ## 7.3 验证安装
 
 ```bash
-# 已验证：124 passed
+# 已验证：242 passed（离线）
 uv run pytest -q
 
-# 已验证：17 个 F401
+# 已验证：0 errors
 uv run ruff check .
 
-# 已验证：7 个文件排序不合格
-uv run isort --check .
+# 已验证：通过（Windows 下必须用模块入口）
+uv run python -m isort --check .
+
+# 已验证：通过（docs 被排除）
+uv run ruff format --check .
 ```
 
 若只想确认核心依赖可用：
@@ -53,7 +59,7 @@ uv run isort --check .
 | 模式 | 入口 | 说明 | 验证状态 |
 |------|------|------|----------|
 | 库调用 | 继承 `Spider`，`await start()` | 唯一的正式用法；无 CLI | 主链路按 ADR-0001 修复，关闭与收敛按 ADR-0003 落地；由 `tests/test_spider.py` 覆盖 |
-| 单元测试 | `uv run pytest` | 9 个测试文件、124 个用例 | 已验证：124 passed |
+| 单元测试 | `uv run pytest` | 17 个测试文件、242 个用例 | 已验证：242 passed |
 | 示例脚本 | `PYTHONPATH=. python example/use_item.py` | 只演示 Item 描述符，不联网；import 即执行 | 已验证（不带 `PYTHONPATH` 时找不到 `webants` 包） |
 | Worker 模式 | `Downloader.start_downloader(many)` | 兼容适配器，调用 `fetch`；`RequestError` 只记录日志 | `try/finally` 只取消自建 worker（`webants/downloader.py:457-472`，P1-20 Closed） |
 | 中间件/持久化 | 手工组装 `MiddlewareManager`/`PersisterManager` | 框架不自动接线 | 静态阅读 |
@@ -84,9 +90,9 @@ uv run isort --check .
 
 ## 7.6 构建与打包
 
-- `pyproject.toml` 只声明项目元数据与工具配置，没有 `[build-system]` 节；`setup.py` 提供 setuptools 配置（`setup.py:1-35`）。
-- 本次未执行 `uv build` 或 `python setup.py sdist`，构建产物未验证。
-- `setup.py` 用 `open("README.md", ...)` 读取长描述（`setup.py:14`），实际文件名是 `readme.md`；Windows 大小写不敏感可工作，Linux 上会失败（[P2-13](08-issues-and-recommendations.md)）。
+- `pyproject.toml` 包含 `[build-system]`（`setuptools.build_meta`），`setup.py` 已删除（ADR-0006）。
+- `uv build` 已验证：生成 `dist/webants-0.1.1.tar.gz` 与 `webants-0.1.1-py3-none-any.whl`。
+- 文件名统一为 `README.md`，大小写敏感文件系统不再失败（P2-13 Closed）。
 - 没有 `console_scripts`，安装后不会产生命令行工具。
 
 ## 7.7 数据导入、备份与恢复

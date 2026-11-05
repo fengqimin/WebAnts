@@ -12,8 +12,8 @@ uv run pytest tests/test_parser.py  # single test file
 uv run pytest -m "not slow"     # skip slow-marked tests
 uv run pytest --asyncio-mode=auto  # explicit (already default in pyproject.toml)
 uv run ruff check .             # lint (VS Code has ruff enabled)
-uv run isort --check .          # import sort check
-uv run black --check .          # format check (line-length=100, target py312)
+uv run python -m isort --check . # import sort check (Windows-safe entry point)
+uv run ruff format --check .    # format check (line-length=100, target py312)
 ```
 
 Test markers: `slow`, `integration`, `unit`.
@@ -43,23 +43,25 @@ Single package `webants/`. Data flow: `Spider -> Scheduler -> Downloader -> Pars
 
 - **Two separate Signal systems**: `spider.py` has a synchronous `Signal` class used by `Spider.signals`. `libs/signals.py` has an async `Signal`/`SignalManager` used by middleware and globally. Don't confuse them.
 - **Two CircuitBreaker implementations**: one in `spider.py` (standalone class), one in `libs/middleware.py` (middleware subclass). They are independent.
-- **Request callbacks must be coroutine functions**: enforced by `assert iscoroutinefunction(callback)` in `Request.__init__`.
-- **Request.__lt__ is inverted**: `return not self.priority < other.priority` — higher priority value = dequeued first, which is the opposite of the typical convention.
+- **Request callbacks must be coroutine functions or async generator functions**: enforced with `inspect` in `Request.__init__` (raises `TypeError`).
+- **Request priority**: lower `priority` value is dequeued first. The scheduler uses `(priority, sequence, ...)` tuples; `Request.__lt__` is a strict weak ordering and is not used by the scheduler.
+- **Request.headers holds only explicit headers**: `Downloader.effective_headers()` merges `DEFAULT_REQUEST_HEADERS` < downloader headers < request headers.
 - **Downloader.get_stats**: returns stats dict copy (renamed from typo `get_stsats`).
 - **exception_tracker** is a global `ExceptionTracker` instance in `libs/exceptions.py`, imported by `libs/signals.py` and `libs/middleware.py`. Its `track()` accepts any `Exception` (falls back to class name when `code`/`metadata` attrs absent).
-- **utils/statistic.py requires `psutil`** but it's not listed in dependencies. Importing the module will fail without it.
+- **utils/statistic.py requires `psutil`** — declared as the optional `monitoring` extra. The module imports safely without it; constructing `PerformanceMonitor` raises `RuntimeError` with an install hint.
 - **login.py requires `playwright`** — listed under `[project.optional-dependencies]`, not core deps.
-- **JsonPersister.load** uses `ujson` via `misc.py` fallback, but directly calls `json.load` (stdlib). Inconsistent with the ujson-preference pattern in the rest of the codebase.
+- **JsonPersister serialization** goes through `webants.utils.misc.dumps/loads` (ujson when available, stdlib fallback); do not import `json` directly in the persister.
 
 ## Testing
 
 - Uses `pytest-asyncio` with `asyncio_mode=auto` and `loop_scope=function`.
 - `conftest.py` adds project root to `sys.path`; provides `http_client` (async httpx) and `sample_html` fixtures.
 - Downloader tests mock HTTP via `unittest.mock.AsyncMock` / `patch`.
-- No CI workflow configured.
+- CI runs `.github/workflows/ci.yml` on Python 3.12 and 3.14 with ruff, isort, ruff format and pytest; all tests must stay offline.
 
 ## Style
 
-- Black formatter (line-length=100, py312).
+- `ruff format` for formatting (line-length=100, py312); run `uv run ruff format .`.
 - isort with black profile (line_length=100, multi_line_output=3).
-- Ruff for linting (enabled in VS Code settings).
+- Ruff linting with an explicit `select` (`E4`, `E7`, `E9`, `F`) in `pyproject.toml`.
+- On Windows use `uv run python -m isort`; the `isort` console entry point can fail with `Failed to canonicalize script path`.

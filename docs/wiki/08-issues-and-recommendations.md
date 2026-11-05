@@ -28,10 +28,10 @@
 
 | 验证项 | 命令 / 脚本 | 实际结果 |
 |--------|-------------|----------|
-| 测试套件 | `uv run pytest -q` | `212 passed`，无失败用例 |
-| Lint | `uv run ruff check .` | `Found 17 errors`，全部 `F401` |
-| 导入排序 | `uv run isort --check .` / `uv run python -m isort --check-only .` | CLI 入口报 `Failed to canonicalize script path`；改用模块方式后 **17 个文件不合格，2 个跳过** |
-| 格式检查 | `uv run black --check .` | `Failed to canonicalize script path`，无法运行；且 `dev` 依赖组未声明 black |
+| 测试套件 | `uv run pytest -q` | `242 passed`，无失败用例 |
+| Lint | `uv run ruff check .` | `All checks passed`（阶段 5 清理后） |
+| 导入排序 | `uv run python -m isort --check .` | 通过；CLI 入口在 Windows 下仍报 `Failed to canonicalize script path` |
+| 格式检查 | `uv run ruff format --check .` | 通过（black 已由 `ruff format` 替代；`docs` 排除） |
 | 配置合并 | 构造 `Config()` 后 `_merge_config({"downloader": {"concurrent_requests": 42}})` | 顶层出现 `concurrent_requests`，`downloader.concurrent_requests` 仍为 10 |
 | 链接过滤 | `FilteringLinkExtractor(base_url=..., normalize=False).extract('<a href="/p">x</a>')` | `AttributeError: 'Link' object has no attribute 'decode'` |
 | 链接归一化 | `normalize=True` 过滤 `http://EXAMPLE.com:80/a?b=2&a=1#f` | 返回的 `Link.url` 仍是原串，未被归一化 |
@@ -105,6 +105,7 @@
 | P2-21 | 统计 | 核心链路 | 静态 | `avg_request_time` 用未完成请求数作分母，并发下失真 | `webants/spider.py:390-395` | 用累计耗时 / 已完成数 |
 | P2-22 | 事件 | 核心链路 | 静态 | `request_scheduled` 信号在 `process_request` 中发送，而非真正入队时 | `webants/spider.py:367` | 移到 `schedule_request` 成功分支 |
 | P2-23 | 生命周期 | 核心链路 | 静态 | `close()` 在 `_running=False` 时直接返回，未启动即关闭会泄漏 client | `webants/spider.py:432-435` | 资源释放与运行状态解耦 |
+| P2-24 | 提取 | 可选层 | 实测 | `extract_and_filter_links(unique=True)` 用 `set(links)` 去重，而 `Link` 未定义 `__eq__`/`__hash__`，相同 URL 不会被去重（ADR-0006 取证新发现） | `webants/libs/extractor.py:384-403` | 按 URL 保序去重 |
 
 ## 8.4 问题簇与修复依赖
 
@@ -181,6 +182,7 @@ async def fetch(self, request: Request) -> httpx.Response:
     if isinstance(result, Request):
         raise RequestError(f"fetch failed: {request.url}")
     return result
+
 
 # webants/spider.py
 callback_result = request.callback(response)
@@ -287,8 +289,8 @@ if self._tasks:
 
 ```python
 if self.normalize:
-    link = normalize_url(link.url)   # link 变成 str
-parts = urlparse(link)               # normalize=False 时仍是 Link 对象
+    link = normalize_url(link.url)  # link 变成 str
+parts = urlparse(link)  # normalize=False 时仍是 Link 对象
 ```
 
 证据：`webants/libs/extractor.py:889-895`；模块级 `extract_and_filter_links` 同样写法（`:307-313`）。实测 `normalize=False` 抛 `AttributeError: 'Link' object has no attribute 'decode'`。而 `normalize=True` 时只把局部变量变成字符串用于判断，最终返回的 `links` 仍是原始 `Link`（`:942-949`），归一化对输出无效。类实现的 `_regex_allowed(link)` 在 `normalize=False` 时也会收到 `Link`，存在同类风险。
@@ -314,9 +316,9 @@ if allowed and self.normalize:
 ```python
 for key, value in config.items():
     if key in self._config and isinstance(self._config[key], dict) and isinstance(value, dict):
-        self._merge_config(value)   # 仍然合并到顶层
+        self._merge_config(value)  # 仍然合并到顶层
     else:
-        self._config[key] = value   # 顶层写入
+        self._config[key] = value  # 顶层写入
 ```
 
 实测 `_merge_config({"downloader": {"concurrent_requests": 42}})` 后，顶层多出 `concurrent_requests=42`，而 `downloader.concurrent_requests` 仍为 10。另外 `DEFAULT_CONFIG.copy()` 是浅拷贝（`:92`），嵌套默认值会被就地修改。
@@ -370,6 +372,7 @@ for priority, receiver in sorted(receivers, key=lambda x: (-x[0], x[1])):
 ```python
 async def flush(self) -> None:
     await self._write_batch()
+
 
 async def close(self) -> None:
     await self.flush()
@@ -622,11 +625,11 @@ await self.request_queue.put((request.priority, request))
 | 2 | P1-01、P1-02、P1-04、P1-18、P1-20、P2-20、P2-23（已完成 2026-11-05） | 生命周期与资源泄漏 | 异常、取消、熔断三种场景下计数恢复；ADR-0002 落地槽位所有权，ADR-0003 落地关闭/取消/收敛契约 |
 | 3 | P1-05、P1-06、P1-07、P1-08、P1-15 ~ P1-17、P2-15 ~ P2-17（已完成 2026-11-05，[ADR-0004](../adr/0004-data-correctness-link-filter-config-cache-signal.md)） | 数据正确性 | 提取器矩阵、Config 合并、缓存统计、信号排序全部通过 |
 | 4 | P1-09、P1-10、P1-11、P2-19（已完成 2026-11-05，[ADR-0005](../adr/0005-optional-layer-wiring-and-persistence-lifecycle.md)） | 可选层接入与关闭语义 | flush 后条数一致；缓存命中语义明确；组装示例可运行（`example/optional_layers.py`） |
-| 5 | 其余 P2 + CI + 仓库卫生 | 收口 | `ruff`、`isort`、`pytest` 在 CI 全绿 |
+| 5 | 其余 P2 + CI + 仓库卫生（ADR 已接受：[ADR-0006](../adr/0006-engineering-closeout-p2-ci-and-hygiene.md)，实施中） | 收口 | `ruff`、`isort`、`ruff format`、`pytest` 在 CI 全绿 |
 
 ## 8.12 验收清单
 
-- [x] `uv run pytest -q` 无失败，且包含 `tests/test_spider.py`（2026-11-05：212 passed）。
+- [x] `uv run pytest -q` 无失败，且包含 `tests/test_spider.py`（2026-11-05：242 passed）。
 - [ ] 子类以 `async def parse(...): yield ...` 定义时，`start_requests()` 不再触发 `AssertionError`。
 - [ ] 回调三种形态（async generator / 普通协程返回单值 / 抛异常）均有测试覆盖。
 - [ ] 用 mock HTTP 完成一次“初始页 → 解析出 2 个链接 → 抓取子页 → 产出 Result”的端到端测试。
@@ -635,12 +638,12 @@ await self.request_queue.put((request.priority, request))
 - [x] `extract_and_filter_links` 在不传 `hosts_allow`/`extensions_allow` 时返回非空结果。
 - [x] `Config` 加载嵌套 YAML 后，顶层不出现子键，默认值保持不变；环境变量可覆盖嵌套键。
 - [x] Persister 在进程退出前能 flush 全部缓存；SQLite 行数与 `save` 次数一致（`tests/test_persister.py`）。
-- [ ] `black --check`、`ruff check`、`isort --check` 在 CI 中可稳定运行（版本固定）。
+- [x] `ruff format --check`、`ruff check`、`isort --check` 在 CI 中可稳定运行（Python 3.12/3.14，ADR-0006）。
 - [x] README 与 `docs/architecture.md` 的能力描述与运行路径一致（可选层已显式接入且默认关闭；异步信号标注为实验性）。
 
 ## 8.13 实施状态
 
-> 更新于 2026-11-05。实现依据 [ADR-0001](../adr/0001-callback-contract-and-retry-ownership.md)（Accepted）、[ADR-0002](../adr/0002-schedule-slot-ownership-and-request-lifecycle.md)（Accepted）、[ADR-0003](../adr/0003-shutdown-cancellation-and-loop-quiescence.md)（Accepted）、[ADR-0004](../adr/0004-data-correctness-link-filter-config-cache-signal.md)（Accepted）与 [ADR-0005](../adr/0005-optional-layer-wiring-and-persistence-lifecycle.md)（Accepted）。
+> 更新于 2026-11-05。实现依据 [ADR-0001](../adr/0001-callback-contract-and-retry-ownership.md)（Accepted）、[ADR-0002](../adr/0002-schedule-slot-ownership-and-request-lifecycle.md)（Accepted）、[ADR-0003](../adr/0003-shutdown-cancellation-and-loop-quiescence.md)（Accepted）、[ADR-0004](../adr/0004-data-correctness-link-filter-config-cache-signal.md)（Accepted）、[ADR-0005](../adr/0005-optional-layer-wiring-and-persistence-lifecycle.md)（Accepted）与 [ADR-0006](../adr/0006-engineering-closeout-p2-ci-and-hygiene.md)（Accepted）。
 
 | 条目 | 状态 | 证据 / 说明 |
 |------|------|-------------|
@@ -669,13 +672,30 @@ await self.request_queue.put((request.priority, request))
 | P1-10 | **Closed** | 新增 `Middleware.lookup`；`ResponseCache` 命中只走 lookup，`process_request` 纯透传；Manager 校验请求链返回 `Request \| None`。`tests/test_middleware.py` |
 | P1-11 | **Closed** | `Spider` 显式注入 `config/middleware/persister`，请求流水线接入四阶段，`Result` 分发后持久化，关闭 flush；异步信号按 ADR-0005 标注实验性、未桥接（BL-001）。`tests/test_spider_optional.py`、`tests/test_config.py` |
 | P2-19 | **Closed** | `JsonPersister` 改为 NDJSON 追加写；旧数组在下一次写入时临时文件 + `os.replace` 原子迁移；坏行跳过并计 `load_errors`。`tests/test_persister.py` |
-| P2-02 ~ P2-14、P2-18、P2-21 | Open | 按 8.11 第 3/5 阶段收口（P2-03 仅模块级 scheme deny 已随 ADR-0004 修正，其余两项仍 Open） |
+| P2-02 | **Closed** | `Request.__lt__` 改为严格弱序（低值先出），调度器继续用 `(priority, sequence)` 元组。`test_priority_ordering_is_strict_weak_order` |
+| P2-03 | **Closed** | `except AttribExtractor` 改为 `hasattr(element, "attrib")` 判断；`extract_links` 跳过空/缺失 URL；模块级 scheme deny 已随 ADR-0004 修正。`tests/test_extractor.py` |
+| P2-04 | **Closed** | README 删除 49–370 行 AI 对话并重构为安装/快速开始/开发/许可；本地 `__pycache__` 清理；`requirements.txt` 删除（ADR-0006） |
+| P2-05 | **Closed** | `ruff check .` 0 错误、`python -m isort --check .` 通过、`ruff format --check .` 通过；新增 CI 门禁 |
+| P2-06 | **Closed** | `psutil` 改为可选 extra `monitoring` + 导入降级；`PerformanceMonitor` 缺依赖时抛带安装提示的 `RuntimeError`。`tests/test_statistic.py` |
+| P2-07 | **Closed** | 登录工具新增 `sample_url` 参数；async 版本改用 `asyncio.sleep`，移除硬编码 IP。`tests/test_login_tool.py` |
+| P2-08 | **Closed** | `JsonPersister` 全部经 `misc.dumps/loads` 序列化；坏输入仍按 `ValueError` 跳过 |
+| P2-09 | **Closed** | `SqlitePersister` 校验 `table_name`（`^[A-Za-z_][A-Za-z0-9_]{0,63}$`）；非法值抛 `ValueError`。`tests/test_persister.py` |
+| P2-10 | **Closed** | `webants/__init__.py` 导出核心爬取类型；可选层仍从 `webants.libs.*` 导入。`tests/test_package.py` |
+| P2-11 | **Closed** | `crawl_time=None` 才取当前时间，显式 `0` 保留。`tests/test_result.py` |
+| P2-12 | **Closed** | `url_to_path` 空路径返回 `""`；`url_with_host` 对无 hostname 的 URL 原样返回。`tests/test_url.py` |
+| P2-13 | **Closed** | 文件名统一为 `README.md`；`setup.py` 删除，元数据并入 `pyproject.toml` |
+| P2-14 | **Closed** | 新增 `[build-system]` 与 `.github/workflows/ci.yml`（Python 3.12/3.14） |
+| P2-18 | **Closed** | `Request.headers` 只存显式头；`Downloader.effective_headers()` 按「默认 < Downloader < Request」合并。`test_downloader_headers_reach_the_wire` 等 |
+| P2-21 | **Closed** | 新增 `total_request_time`，`avg_request_time = total_request_time / completed_requests`。`test_avg_request_time_uses_completed_requests` |
+| P2-24 | **Closed** | `extract_and_filter_links(unique=True)` 按 URL 保序去重，保留首次出现；不改变 `Link` 相等性。`test_extract_and_filter_links_deduplicates_by_url` |
 
 阶段 3（P1-05/06/07/08/15/16/17、P2-15/16/17）的依据是 [ADR-0004](../adr/0004-data-correctness-link-filter-config-cache-signal.md)（Accepted，2026-11-05，含 E1–E15 实测证据），已于 2026-11-05 按 T1–T6 实施完成。
 
 阶段 4（P1-09/10/11、P2-19）的依据是 [ADR-0005](../adr/0005-optional-layer-wiring-and-persistence-lifecycle.md)（Accepted，2026-11-05），已按 T1–T6 实施完成：Persister 生命周期与 NDJSON、中间件 `lookup`、Spider 可选层注入、配置映射、测试与文档/示例同步。异步信号桥接不在阶段 4 范围，见 [待办 BL-001](../backlog.md#bl-001-异步信号桥接)。
 
-当前测试基线：`uv run pytest -q` → `212 passed`。`tests/test_spider.py`、`tests/test_spider_optional.py`、`tests/test_middleware.py`、`tests/test_persister.py`、`tests/test_downloader.py`、`tests/test_request.py`、`tests/test_scheduler.py`、`tests/test_item.py`、`tests/test_extractor.py`、`tests/test_parser.py`、`tests/test_config.py`、`tests/test_signals.py` 全部通过且不访问网络。`isort` 需用 `uv run python -m isort`（CLI 入口报 `Failed to canonicalize script path`）。
+阶段 5（P2-02/03/04/05/06/07/08/09/10/11/12/13/14/18/21 + 新登记的 P2-24）的依据是 [ADR-0006](../adr/0006-engineering-closeout-p2-ci-and-hygiene.md)（Accepted，2026-11-05），已按 T1–T8 实施完成：依赖与构建收口、README 重构、请求头/排序/提取器/序列化/URL/统计边界修正、`ruff format` 与 CI 双版本门禁。`setup.py`、`requirements.txt` 已删除。
+
+当前测试基线：`uv run pytest -q` → `242 passed`（离线）。`uv run ruff check .`、`uv run python -m isort --check .`、`uv run ruff format --check .` 全部通过，CI 在 Python 3.12 与 3.14 上复跑。`isort` 需用 `uv run python -m isort`（CLI 入口报 `Failed to canonicalize script path`）。
 
 ## 附录 A 原版勘误表
 

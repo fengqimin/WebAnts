@@ -2,7 +2,7 @@
 
 ## 6.1 运行时依赖
 
-来自 `pyproject.toml:7-17`，与 `setup.py:17-26` 基本一致（`setup.py` 未列出 `setuptools`）。
+来自 `pyproject.toml` 的 `[project].dependencies`。`setup.py` 与 `requirements.txt` 已按 [ADR-0006](../adr/0006-engineering-closeout-p2-ci-and-hygiene.md) 删除，`pyproject.toml` 与 `uv.lock` 是唯一事实源。
 
 | 依赖 | 约束 | 实际使用点 | 用途 |
 |------|------|------------|------|
@@ -18,24 +18,23 @@
 
 ## 6.2 开发依赖
 
-`pyproject.toml:57-64`：
+`pyproject.toml` 的 `[dependency-groups].dev`：
 
 | 依赖 | 用途 | 证据 |
 |------|------|------|
 | `pytest>=8.3.5` | 测试框架 | `tests/` |
-| `pytest-asyncio>=0.26.0` | 异步测试（`asyncio_mode=auto`） | `pyproject.toml:33-43`、`tests/conftest.py:12` |
-| `pytest-cov>=6.1.1` | 覆盖率；`addopts` 带 `--cov-report=term-missing` | `pyproject.toml:40-43` |
-| `isort>=6.0.1` | 导入排序 | 实测 `uv run isort --check .` 可运行 |
+| `pytest-asyncio>=0.26.0` | 异步测试（`asyncio_mode=auto`） | `tests/conftest.py:12` |
+| `pytest-cov>=6.1.1` | 覆盖率；`addopts` 带 `--cov-report=term-missing` | `pyproject.toml` |
+| `isort>=6.0.1` | 导入排序 | 必须用 `uv run python -m isort`（Windows 下 `isort` 入口失效） |
+| `ruff>=0.9.0` | lint + format（`ruff format` 替代 black） | 见 §6.5 |
 | `ipython>=9.1.0` | 交互调试 | 未在仓库中使用 |
 
-**声明与实际不一致**：
+可选依赖组：
 
-- `ruff` 未写入 `pyproject.toml` 的 dev 组，但 `uv run ruff check .` 能解析到可执行文件（本机实测，17 个 F401）；要么来自 uv 的工具缓存，要么来自全局环境，仓库本身没有锁定版本。
-- `black` 未声明，实测 `uv run black --check .` 失败（`Failed to canonicalize script path`），无法验证格式。
-- `psutil` 未声明、`uv.lock` 中也未找到；`webants/utils/statistic.py:12` 直接 `import psutil`，实测 `ModuleNotFoundError`。
-- `playwright` 在可选组 `[project.optional-dependencies].playwright` 中声明（`pyproject.toml:19-22`），`webants/utils/login.py:6-7` 直接导入，未安装时 import 该模块即失败。
+- `playwright`：`webants/utils/login.py` 顶层导入，未安装时 import 该模块失败（功能本身可选）。
+- `monitoring`：`psutil>=5.9`。`webants/utils/statistic.py` 用 `try/except ImportError` 导入，模块可正常 import；只有构造 `PerformanceMonitor` 时才抛 `RuntimeError` 并提示 `pip install "webants[monitoring]"`。
 
-`requirements.txt` 与 manifest 的漂移：缺少 `pyyaml`、`psutil`；包含 `setuptools`；版本是精确锁定的旧版（如 `httpx==0.28.1`、`lxml==5.3.2`）。它更像某次环境的冻结输出，而不是项目依赖清单。
+`black` 不再使用：`[tool.black]` 与 dev 依赖均已移除；格式由 `[tool.ruff.format]` 承担。
 
 ## 6.3 模块依赖图
 
@@ -87,7 +86,7 @@ flowchart TD
     CFG --> YAML["pyyaml"]
 
     STAT["utils/statistic.py"] --> LOG
-    STAT --> PSUTIL["psutil（未声明）"]
+    STAT --> PSUTIL["psutil（可选 extra monitoring）"]
 
     LOGIN["utils/login.py"] --> PW["playwright（可选）"]
 ```
@@ -97,24 +96,24 @@ flowchart TD
 ## 6.4 导入风格
 
 - 全部使用绝对导入：`from webants.libs.request import Request`（例：`webants/spider.py:16-21`），没有相对导入。
-- `webants/__init__.py` 只有一行空行（`webants/__init__.py:1`），`webants/libs/__init__.py` 为空文件，因此 `import webants` 不会导出任何公共符号；使用方必须写完整路径。
+- `webants/__init__.py` 导出核心爬取类型（`Spider`、`Request`、`Result`、`Field`、`Item` 及四个 Item 子类）；可选层仍从 `webants.libs.*` 导入，不进入根命名空间（ADR-0006）。
 - 测试通过 `conftest.py` 把仓库根加入 `sys.path`（`tests/conftest.py:7-9`），而不是依赖安装后的包。
-- `webants/utils/misc.py` 与 `login.py` 用 `try: import ujson as json / except ImportError: import json` 做可选加速（`misc.py:5-8`、`login.py:9-12`）；`JsonPersister` 则直接 `import json`（`persister.py:11`），风格不统一。
+- `webants/utils/misc.py` 与 `login.py` 用 `try: import ujson as json / except ImportError: import json` 做可选加速；`JsonPersister` 已改为经 `misc.dumps/loads` 序列化，不再直接 `import json`（ADR-0006）。
 
 ## 6.5 边界契约（实测）
 
-仓库没有 `import-linter`、`ruff` 的 `[tool.ruff]` 配置或 `mypy`/`pyright` 配置；`pyproject.toml` 只有 black、isort、pytest 三节（`:24-55`）。因此“边界规则”只存在于 `AGENTS.md` 的描述中，没有可执行检查。
+仓库没有 `import-linter`、`mypy`/`pyright` 配置；`pyproject.toml` 包含 `[tool.ruff]`（显式 `select = ["E4", "E7", "E9", "F"]`）、`[tool.ruff.format]`、`[tool.isort]` 与 pytest 配置。边界规则仍主要写在 `AGENTS.md`，但 lint/格式已有可执行门禁。
 
-本次实际执行的命令与结果：
+本次实际执行的命令与结果（2026-11-05，阶段 5 完成后）：
 
 | 命令 | 结果 | 说明 |
 |------|------|------|
-| `uv run pytest -q` | **212 passed** | 无失败用例（ADR-0005 T1–T5 后） |
-| `uv run ruff check .` | **Found 10 errors**，全部为 `F401` 未使用导入 | 分布：`example/use_item.py` 7 处、`webants/utils/statistic.py` 3 处；其余历史 F401 已随 ADR-0004/0005 清理 |
-| `uv run isort --check .` | **无法运行**（`Failed to canonicalize script path`） | 改用 `uv run python -m isort --check-only .`：10 个文件不合格、2 个跳过 |
-| `uv run black --check .` | 无法运行 | `Failed to canonicalize script path`，black 未安装/未声明 |
+| `uv run pytest -q` | **242 passed** | 全绿且离线 |
+| `uv run ruff check .` | **All checks passed** | 10 个历史 F401 已清理 |
+| `uv run python -m isort --check .` | **通过** | 仅 3 个文件被跳过（与仓库无关） |
+| `uv run ruff format --check .` | **通过** | black 已由 `ruff format` 替代；`docs` 被排除（避免格式化历史 ADR 的 Markdown 代码块） |
 
-`ruff` 的 10 个错误都是可自动修复的 `F401`，不影响运行，属于 8.11 阶段 5 的清理项（P2-05）。
+CI 在 `.github/workflows/ci.yml` 中按 Python 3.12 与 3.14 双 job 复跑上述四条命令（ADR-0006）。
 
 ## 6.6 耦合热点
 
@@ -125,7 +124,7 @@ flowchart TD
 | `Parser` 实例缓存 | `OrderedDict`，key 仅内容哈希，返回深拷贝 | 实例可回收、统计区分命中/未命中（P1-07、P2-17 Closed，ADR-0004） |
 | `Config` 嵌套合并 | `deepcopy` 默认值 + 递归深合并 + `__` 环境变量 | 嵌套键不再拍平，默认值不被实例污染（P1-06、P2-16 Closed，ADR-0004） |
 | `ExtractorFactory` 元类注册表 | 类字典全局可变，按前缀匹配 | 新增/重名提取器行为隐式 |
-| `utils/statistic.py` | 顶层 `import psutil` | 未安装即无法 import 整个模块（P2-06） |
+| `utils/statistic.py` | `psutil` 改为可选依赖 + 导入降级 | 模块可导入；使用监控时才要求 `webants[monitoring]`（P2-06 Closed，ADR-0006） |
 | `SignalManager` | 全局单例 + 同步/异步两套 | 事件语义仍分裂；异步版改为高优先级先执行、同优先级按注册顺序（P1-08、P2-15 Closed，ADR-0004）；生命周期未桥接（BL-001） |
 | 中间件 `lookup` | 缓存命中走独立阶段，请求链只接受 `Request` | 避免 `Response` 污染请求链（P1-10 Closed，ADR-0005） |
 | Persister 生命周期 | `flush/close` + 实例锁；JSON 为 NDJSON 追加 | 关闭前落盘；旧数组自动迁移（P1-09、P2-19 Closed，ADR-0005） |

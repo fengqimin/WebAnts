@@ -4,9 +4,9 @@
 |------|------|
 | 代码版本 | 2026-11-05 工作区（ADR-0005 实施后） |
 | 生成日期 | 2026-11-03；2026-11-05 同步 |
-| 文档范围 | `webants/`（全部 Python 源码）、`tests/`、`pyproject.toml`、`setup.py`、`requirements.txt`、`readme*.md`、`docs/architecture.md`、`example/` |
+| 文档范围 | `webants/`（全部 Python 源码）、`tests/`、`pyproject.toml`、`README.md`、`readme.cn.md`、`.github/workflows/ci.yml`、`docs/architecture.md`、`example/` |
 | 数据快照 | 仓库内无 SQLite 数据库文件；仅 `data/html/awesome-python.html`（约 152 KB 样例 HTML），未做行数统计 |
-| 运行验证 | `uv run pytest -q` → 212 passed（2026-11-05）；`uv run ruff check .` → 10 errors（剩余既有 F401）；`uv run python -m isort --check-only .` → 10 个文件不合格、2 个跳过；`uv run black --check .` → 不可用；问题与修复状态见 [08](08-issues-and-recommendations.md) |
+| 运行验证 | `uv run pytest -q` → 242 passed（2026-11-05，阶段 5 完成后）；`uv run ruff check .`、`uv run python -m isort --check .`、`uv run ruff format --check .` 全部通过；CI 见 `.github/workflows/ci.yml`（Python 3.12/3.14）；问题与修复状态见 [08](08-issues-and-recommendations.md) |
 
 ## 这个项目是什么
 
@@ -20,7 +20,7 @@ WebAnts 是一个用 `httpx` + `lxml` 实现的异步爬虫框架。它把爬取
 |------|------|
 | 语言 / 版本 | Python ≥ 3.12（`.python-version` 为 `3.12`） |
 | 核心依赖 | `httpx` 0.28.x、`lxml` 5.3+、`pydantic` 2.11+、`pyyaml`、`ujson`、`charset-normalizer` |
-| 包管理 | `uv`（`uv.lock`），同时保留 `setup.py` 与 `requirements.txt` |
+| 包管理 | `uv`；`pyproject.toml` + `uv.lock` 是唯一事实源（`setup.py`、`requirements.txt` 已删除，ADR-0006） |
 | 入口 | 无 CLI、无 HTTP 服务；继承 `webants.spider.Spider` 并调用 `await spider.start()` |
 | 数据流 | `Spider → Scheduler → Downloader → Parser/回调 → Scheduler / Spider` |
 | 数据落盘 | `libs/persister.py` 的 JSON(NDJSON) / CSV / SQLite；显式注入后由 Spider 分发并关闭时 flush |
@@ -79,7 +79,7 @@ WebAnts 是一个用 `httpx` + `lxml` 实现的异步爬虫框架。它把爬取
 # 安装依赖（本次未执行，标注为未验证）
 uv sync
 
-# 运行测试（已验证：212 passed）
+# 运行测试（已验证：242 passed）
 uv run pytest -q
 
 # 可选层组装示例（离线运行）
@@ -95,6 +95,7 @@ uv run pytest tests/test_parser.py
 from webants.libs.result import Result
 from webants.spider import Spider
 
+
 class MySpider(Spider):
     name = "my_spider"
     start_urls = ["https://example.com/"]
@@ -106,6 +107,7 @@ class MySpider(Spider):
             fields={"body": response.text},
             url=str(response.url),
         )
+
 
 # async with MySpider() as spider:   # __aexit__ 保证 close
 #     await spider.start()           # 关闭后不可重启，每次爬取新建实例

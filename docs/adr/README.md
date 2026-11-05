@@ -20,6 +20,7 @@
 | [ADR-0003](0003-shutdown-cancellation-and-loop-quiescence.md) | 关闭、取消与主循环收敛 | Accepted | 2026-11-04 | P1-02、P1-20、P2-23 |
 | [ADR-0004](0004-data-correctness-link-filter-config-cache-signal.md) | 数据正确性契约：链接过滤、配置合并、解析缓存与信号顺序 | Accepted | 2026-11-05 | P1-05、P1-06、P1-07、P1-08、P1-15、P1-16、P1-17、P2-15、P2-16、P2-17 |
 | [ADR-0005](0005-optional-layer-wiring-and-persistence-lifecycle.md) | 可选层接入与关闭语义：中间件缓存命中、配置注入、持久化 flush/close 与 JSON 原子追加 | Accepted | 2026-11-05 | P1-09、P1-10、P1-11、P2-19 |
+| [ADR-0006](0006-engineering-closeout-p2-ci-and-hygiene.md) | 工程收口：剩余 P2 修正、CI 与仓库卫生 | Accepted | 2026-11-05 | P2-02、P2-03、P2-04、P2-05、P2-06、P2-07、P2-08、P2-09、P2-10、P2-11、P2-12、P2-13、P2-14、P2-18、P2-21、P2-24 |
 
 ## 新增约定
 

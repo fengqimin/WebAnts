@@ -178,8 +178,8 @@ flowchart TD
 - **并发**：调度器为每个域名建 `asyncio.Semaphore(max_domain_concurrent)`（`webants/scheduler.py:111-113`），下载器另有 `asyncio.Semaphore(concurrency)`（`webants/downloader.py:154`）。两者默认值都来自 `Spider(concurrent_requests=10)`，但分属不同层，实际并发是两层约束的叠加。
 - **可靠性**：重试完全内聚在 `Downloader.fetch`（`webants/downloader.py:335-432`）；耗尽后抛 `RequestError`，`Spider.process_request` 走 errback 一次。Spider 级 `_failed_urls` 已随 ADR-0001 移除；主循环按 `poll_interval` 轮询而非阻塞，退出需同时满足「队列空 ∧ 无在飞任务 ∧ 静默 ≥ `idle_grace`」，关闭走 ADR-0003 的释放顺序。
 - **可观测性**：`Spider.get_stats()` 聚合 scheduler/parser/downloader 统计；注入可选层后额外包含 `middleware_stats` 与 `persister_stats`（`webants/spider.py:926-950`）；日志通过 `get_logger` 按名字复用 handler（`webants/utils/logger.py:31-35`）。
-- **安全**：框架不处理认证、不校验目标站点、默认跟随重定向并带固定 UA（`webants/downloader.py:150,187-190`）；SQLite 表名用 f-string 拼接（`webants/libs/persister.py:354,451`），仅在配置可信时安全。
-- **可移植性**：`setup.py` 声明 `Operating System :: Microsoft :: Windows`（`setup.py:33`），但源码本身使用 `pathlib`，跨平台障碍主要来自测试与示例中的硬编码路径。
+- **安全**：框架不处理认证、不校验目标站点、默认跟随重定向并带固定 UA（`webants/downloader.py`）；SQLite 表名在构造时按 `^[A-Za-z_][A-Za-z0-9_]{0,63}$` 校验（ADR-0006，P2-09 Closed），不再接受任意字符串进入标识符位置。
+- **可移植性**：`pyproject.toml` classifiers 标注 Windows，但源码本身使用 `pathlib`，跨平台障碍主要来自测试与示例中的硬编码路径。
 
 ## 1.9 架构风险
 

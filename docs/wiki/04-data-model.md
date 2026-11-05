@@ -46,7 +46,7 @@ classDiagram
 | `url` | `Optional[str]` | `None` | 来源 URL | 构造参数（`:104`） |
 | `mediatype` | `Optional[str]` | `None` | 内容类型 | 构造参数（`:105`） |
 | `title` | `Optional[str]` | `None` | 页面标题 | 构造参数（`:106`） |
-| `crawl_time` | `float` | 当前时间 | 抓取时间 | `crawl_time or time.time()`（`:107`） |
+| `crawl_time` | `float` | 当前时间 | 抓取时间 | `None` 时取 `time.time()`；显式 `0` 保留（ADR-0006） |
 | `_errors` | `List[str]` | `[]` | 字段校验错误 | 构造/`add_field`（`:91,101,134`） |
 | `_warnings` | `List[str]` | `[]` | 预留警告 | 当前无写入点（`:92`） |
 
@@ -186,4 +186,4 @@ flowchart LR
 | `errors`/`warnings`/`mediatype` 不落库 | 溯源信息缺失 | `Result.to_dict` 与 INSERT 列不一致 |
 | 无迁移机制 | 表结构变更需手工处理 | 全文件无 migration 函数 |
 | 表名 f-string 拼接 | 表名来自配置时可注入 SQL | `webants/libs/persister.py:354,416,451-453` |
-| `crawl_time` 显式 0 被覆盖 | 时间语义不精确 | `webants/libs/result.py:107` |
+| ~~`crawl_time` 显式 0 被覆盖~~ | 已修正为 `None` 才取当前时间（ADR-0006，P2-11 Closed） | `webants/libs/result.py` |

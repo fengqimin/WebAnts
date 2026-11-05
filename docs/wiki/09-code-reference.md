@@ -61,7 +61,8 @@
 | `Downloader.__init__` | method | `:100` | 统计、超时、连接池、重试配置、client | `Spider.__init__` |
 | `Downloader._setup_timeout` | method | `:174` | float/dict → `httpx.Timeout` | `__init__` |
 | `Downloader._setup_limits` | method | `:180` | 连接池默认值合并 | `__init__` |
-| `Downloader._setup_headers` | method | `:189` | 注入默认 UA | `__init__` |
+| `Downloader._setup_headers` | method | `:189` | 只保存 Downloader 级 headers，不注入默认值 | `__init__` |
+| `Downloader.effective_headers` | method | `:197` | 合并「默认 < Downloader < Request」请求头 | `_fetch` |
 | `Downloader._setup_http_client` | method | `:197` | 创建 `AsyncClient` | `__init__` |
 | `Downloader._fetch` | async method | `:209` | 单次 HTTP 尝试；不调用回调，异常不吞 | `fetch` |
 | `Downloader._update_stats` | method | `:271` | 响应时间统计（按 `total_attempts`） | `_fetch` |
@@ -97,7 +98,7 @@
 
 | 符号 | 类型 | 位置 | 用途 | 调用方 |
 |------|------|------|------|--------|
-| `DEFAULT_REQUEST_HEADERS` | constant | `webants/libs/request.py:18` | 默认请求头 | `Request.__init__` |
+| `DEFAULT_REQUEST_HEADERS` | constant | `webants/libs/request.py:18` | 默认请求头 | `Downloader.effective_headers` |
 | `Request` | class | `:27` | 请求模型（`__slots__`） | 全链路 |
 | `Request.METHODS` | class attr | `:30` | 允许的 HTTP 方法 | `_validate_method` |
 | `Request.__init__` | method | `:55` | 校验、默认值、回调与 `cb_kwargs` 校验 | 全链路 |
@@ -263,7 +264,7 @@
 | `args_to_list` | function | `:23` | 单值转列表 | `extractor.py` |
 | `copy_object` | function | `:32` | 反射复制对象 | 未被使用 |
 | `TimeSeriesMetric` | class | `webants/utils/statistic.py:21` | 滑动窗口指标 | `StatsCollector` |
-| `PerformanceMonitor` | class | `:94` | psutil 采样线程 | `StatsCollector` |
+| `PerformanceMonitor` | class | `:94` | psutil 采样线程（需 `webants[monitoring]`；缺依赖时构造抛 `RuntimeError`） | `StatsCollector` |
 | `StatsCollector` | class | `:205` | 爬虫统计聚合 | 未被 Spider 使用 |
 | `async_login_with_playwright` | async function | `webants/utils/login.py:17` | Playwright 异步登录 | 未被使用 |
 | `sync_login_with_playwright` | function | `:76` | Playwright 同步登录 | 未被使用 |
@@ -286,4 +287,4 @@
 | `tests/conftest.py` | — | `http_client`、`sample_html` fixture | 将仓库根加入 `sys.path` |
 | `example/use_item.py` | — | `LinkItemDescriptor` / `TextItemDescriptor` | import 即执行 |
 
-合计 155 个测试用例（`uv run pytest -q` 报告 `155 passed`，2026-11-05）。
+阶段 5 完成后合计 242 个测试用例（`uv run pytest -q` 报告 `242 passed`，2026-11-05）；上表为阶段 4 时的文件级拆分，新增用例分布在 `test_request.py`、`test_downloader.py`、`test_extractor.py`、`test_persister.py`、`test_result.py`、`test_spider.py`、`test_url.py`、`test_statistic.py`、`test_login_tool.py`、`test_package.py`。

@@ -6,7 +6,7 @@
 
 | 名称 | 值 | 位置 |
 |------|----|------|
-| `DEFAULT_REQUEST_HEADERS` | Accept、Accept-Language `en`、Accept-Encoding `gzip, deflate`、Connection `keep-alive`、固定 Firefox UA | `webants/libs/request.py:18-24` |
+| `DEFAULT_REQUEST_HEADERS` | Accept、Accept-Language `en`、Accept-Encoding `gzip, deflate`、Connection `keep-alive`、固定 Firefox UA；由 `Downloader.effective_headers()` 在每次请求时合并（`Request.headers` 只存显式头） | `webants/libs/request.py`、`webants/downloader.py` |
 | `Downloader.DEFAULT_RETRY_STATUS_CODES` | 408/425/429/500/502/503/504（可由 `retry_status_codes` 覆盖） | `webants/downloader.py:93,163-171` |
 | 重试退避 | `base=1s`、`factor=2`、`max=60s`、`jitter=25%`；429/503 参考 `Retry-After` | `webants/downloader.py:163-166,289-324` |
 | HTTP 超时 | `httpx.Timeout(30)`（Spider 默认；`Config` 可覆盖） | `webants/spider.py:161-320`；`webants/downloader.py:144,170-175` |
@@ -108,7 +108,7 @@
 
 1. `max_attempts = max(1, retries + 1)`；`total_requests+1`；首次请求前只等待一次 `request.delay or self.delay`（`:354-361`）。
 2. 循环尝试：第 `n` 次重试前计算指数退避，并按 429/503 的 `Retry-After` 取较大值（`:363-378`）；每次尝试 `total_attempts+1`。
-3. `_fetch`（`:209-269`）只做单次 HTTP：透传 method/url/headers/timeout、body（dict → `json`，其余 → `content`）、cookies（合并 client jar 后显式 `Cookie` 头）、referer；**不调用 callback**，异常不吞。
+3. `_fetch` 只做单次 HTTP：透传 method/url/合并后的 headers（默认 < Downloader < Request）、timeout、body（dict → `json`，其余 → `content`）、cookies（合并 client jar 后显式 `Cookie` 头）、referer；**不调用 callback**，异常不吞。
 4. 状态码命中 `retry_status_codes`：未耗尽则继续；耗尽抛 `RequestError(code="RETRY_EXHAUSTED")`（`:395-414`）。
 5. 传输异常：未耗尽则继续；耗尽抛 `RequestError(code="FETCH_FAILED")`（`:381-394`）。
 6. 非可重试响应（含 2xx/3xx/4xx）：`successful_requests+1` 并返回 `httpx.Response`（`:416-417`）。
@@ -182,7 +182,7 @@
 }
 ```
 
-结构见 `webants/libs/result.py:183-201`。注意 `crawl_time` 参数默认 0.0，但构造时用 `crawl_time or time.time()`，显式传 0 也会被覆盖（`:107`）。
+结构见 `webants/libs/result.py`。`crawl_time=None`（默认）取当前时间；显式传入 `0` 会保留（ADR-0006，P2-11 Closed）。
 
 运行期中间产物：
 

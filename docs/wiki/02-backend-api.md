@@ -104,9 +104,9 @@ stateDiagram-v2
 | 能力 | 说明 | 证据 |
 |------|------|------|
 | 构造校验 | `validate=True` 时校验 method 与 URL；URL 必须含 scheme 与 netloc | `webants/libs/request.py:99-102,143-169` |
-| 回调校验 | callback/errback 必须是 coroutine function，否则 `AssertionError` | `webants/libs/request.py:110-118` |
-| 默认头 | `DEFAULT_REQUEST_HEADERS` 与传入 headers 合并 | `webants/libs/request.py:18-24,105` |
-| 优先级 | `__lt__` 返回 `not self.priority < other.priority`，数值大者先出队 | `webants/libs/request.py:175-177` |
+| 回调校验 | callback 接受 coroutine function 或 async generator function，errback 只接受 coroutine function；否则 `TypeError` | `webants/libs/request.py` |
+| 请求头 | `headers` **只保存显式传入的头**；`DEFAULT_REQUEST_HEADERS` 由 `Downloader.effective_headers()` 按「默认 < Downloader < Request」合并 | `webants/libs/request.py`、`webants/downloader.py` |
+| 优先级 | `__lt__` 返回 `self.priority < other.priority`（严格弱序），数值小者先出队；调度器实际使用 `(priority, sequence)` 元组 | `webants/libs/request.py`、`webants/scheduler.py` |
 | 指纹 | `fingerprint()` 由 method + 归一化 URL + body 组成 | `webants/libs/request.py:189-225` |
 | 复制/替换 | `copy(**kwargs)` 新建；`replace(**kwargs)` 原地修改 | `webants/libs/request.py:227-276` |
 | 中间件钩子 | `prepare()` 依次 await `_middlewares` 的 `process_request` | `webants/libs/request.py:278-297` |
@@ -117,7 +117,7 @@ stateDiagram-v2
 
 | 方法 | 说明 | 证据 |
 |------|------|------|
-| `Result(spider, fields, status_code=200, url=None, mediatype=None, title=None, crawl_time=0.0)` | 原始值自动包成 `Field`；`None` 值记入 `_errors` | `webants/libs/result.py:68-107` |
+| `Result(spider, fields, status_code=200, url=None, mediatype=None, title=None, crawl_time=None)` | 原始值自动包成 `Field`；`None` 值记入 `_errors`；`crawl_time=None` 取当前时间，显式 `0` 会保留 | `webants/libs/result.py` |
 | `add_field(name, field)` | 新增字段，失败记错误 | `webants/libs/result.py:117-134` |
 | `get_field` / `get_value` | 取 `Field` / 取原始值 | `webants/libs/result.py:136-157` |
 | `is_valid` / `get_errors` / `get_warnings` | 校验结果与错误副本 | `webants/libs/result.py:159-181` |
