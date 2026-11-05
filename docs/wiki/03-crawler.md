@@ -120,25 +120,27 @@
 
 ## 3.6 阶段 5：解析与提取
 
-`Parser.parse`（`webants/parser.py:107-164`）：
+`Parser.parse`（`webants/parser.py:106-184`）：
 
 1. `total_parses+1`。
-2. 若是 `bytes`：按 `encoding or self.encoding` 解码；`UnicodeDecodeError` 时用 `charset_normalizer.detect`，置信度 > 0.8 才采用，否则抛 `ParserError`（`:124-153`）。
-3. 计算 SHA-1 内容哈希（`:68-72`），调用 `_cached_parse(hash, content)`（`:156-158`）。
-4. `_cached_parse` 检查大小上限，`fromstring(content, parser=self._parser)`（`:74-105`）。
+2. 若是 `bytes`：按 `encoding or self.encoding` 解码；`UnicodeDecodeError` 时用 `charset_normalizer.detect`，置信度 > 0.8 才采用，否则抛 `ParserError`（`:125-152`）。
+3. 检查大小上限（`:154-159`）。
+4. 计算 SHA-1 内容哈希，查询实例级 `OrderedDict`（`:161-175`）：命中则 `move_to_end`、`cache_hits+1`、返回深拷贝；未命中则解析、`cache_misses+1`、写入缓存并按 `cache_size` 淘汰，返回深拷贝（`:176-184`）。
+5. `_parse_content` 执行 `fromstring`，失败包装为 `ParserError`（`:82-104`）。
 
-缓存与统计：
+缓存与统计（[ADR-0004](../adr/0004-data-correctness-link-filter-config-cache-signal.md)）：
 
-- `_cached_parse` 是绑定在实例方法上的 `functools.lru_cache`，key 包含 `self`，会持有 Parser 实例（`:74-76`）。
-- `parse` 每次调用都 `cache_hits+1`（`:159`），并不区分命中；实测首次解析后 `stats["cache_hits"]==1` 而 `cache_info().hits==0`。
-- `css`/`xpath` 同样无条件累加 `css_cache_hits`/`xpath_cache_hits`（`:190-191,209-210`）。
+- 缓存归 Parser 实例所有，key 仅内容哈希；不再用 `lru_cache` 修饰实例方法，实例可被回收，跨实例不共享树。
+- 首次解析计入 `cache_misses`，只有真正命中才累加 `cache_hits`；`get_stats()["cache_info"]` 保留 `hits/misses/maxsize/currsize` 形状（`:268-284`）。
+- `parse` 每次返回深拷贝，调用方修改返回树不会污染缓存。
+- `css`/`xpath` 只在复用已编译对象时计 `*_cache_hits`，首次编译计 `*_cache_misses`（`:186-203`）。
 
 提取层（可选，需调用方显式使用）：
 
 1. `Item` 实例持有 `html`，字段描述符在 `__get__` 时调用 `extractor.extract(instance.html)`（`webants/libs/item.py:52-67`）。
 2. `ExtractorFactory.create_extractor` 按类名前缀查找（`webants/libs/extractor.py:430-441`），类由元类自动注册（`:444-459`）。
 3. `_LxmlElementExtractor.extract` 对 `str` 调用 `etree.HTML`，再按 selector → xpath → tags 顺序找元素（`:574-614`）。
-4. `FilteringLinkExtractor` 先用 `LinkExtractor` 取 `Link` 列表，再逐条 `link_allowed` 过滤（`:932-949`）。
+4. `FilteringLinkExtractor` 先用 `LinkExtractor` 取 `Link` 列表，交给共享 `_LinkFilter` 判定（输入恒为 URL 字符串），再按 `normalize` 重建输出（`webants/libs/extractor.py:239-350,881-911`）。模块级 `extract_and_filter_links` 使用同一核心（`:354-410`）。
 
 ## 3.7 阶段 6：结果与中间产物
 
@@ -178,7 +180,7 @@
 | `_last_activity` / `idle_grace` / `_closed` | `Spider` 实例 | 收敛时钟、静默窗口与终态标志 |
 | `_outstanding` / `_reserved_urls` | `Scheduler` 实例 | 未归还的 slot 与正在调度中的 URL；`close()` 后应为空 |
 | `retry_requests` / `total_retries` / `total_attempts` | `Downloader.stats` | 进程内计数，不再保存 URL 集合 |
-| `_cached_parse` LRU | Parser 类级缓存 | 最多 1000 条，实例被 key 持有 |
+| `_cache` | Parser 实例缓存 | 最多 `cache_size` 条（默认 1000），key 仅内容哈希；返回深拷贝 |
 | `_css_cache` / `_xpath_cache` | Parser 实例 dict | 无上限 |
 | `response_queue` | Downloader 实例 | 默认创建但 Spider 不消费（仅 worker 模式） |
 
@@ -195,8 +197,8 @@
 | 下载失败（HTTPError/可重试状态耗尽） | `fetch` 抛 `RequestError`，`process_request` 走 errback；不再构造 600 | `webants/downloader.py:381-414` |
 | 请求未入队就调用 `process_request` | 不接触调度资源，`slot=None`，`finally` 无需释放；`_inflight` 自行登记/清理 | `webants/spider.py:430-501` |
 | 队列满 | `PriorityQueue.put` 挂起；持有域名信号量 | `webants/scheduler.py:118,163` |
-| 文档为空字符串 | `fromstring` 抛错并包装为 `ParserError` | `webants/parser.py:90-105` |
-| 链接过滤 `normalize=False` | `urlparse(Link)` → `AttributeError: 'Link' object has no attribute 'decode'` | 实测；`webants/libs/extractor.py:307-313,889-895` |
+| 文档为空字符串 | `fromstring` 抛错并包装为 `ParserError` | `webants/parser.py:82-104` |
+| 链接过滤 `normalize=False` | 正常返回；判定统一用 canonical URL，`normalize` 只决定输出是否重建为归一化 URL（ADR-0004） | `webants/libs/extractor.py:239-350,881-911` |
 | 站点返回 403/404 | 直接返回 Response，不重试；是否视为失败由 callback 决定 | `webants/downloader.py:93,416-417` |
 
 ## 3.9 入口与“CLI”

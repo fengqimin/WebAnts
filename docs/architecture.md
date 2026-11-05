@@ -27,7 +27,7 @@ graph TD
 
     subgraph 解析层["解析层 (Parser)"]
         PS["Parser"]
-        LRU["_cached_parse<br/>LRU 缓存"]
+        LRU["_cache<br/>实例级 LRU（返回副本）"]
         CSS["_css_cache"]
         XP["_xpath_cache"]
         ENC["编码检测<br/>charset_normalizer"]
@@ -228,7 +228,7 @@ flowchart TD
 | **自适应限速** | 指数移动平均(α=0.2)估算延迟 + 随机抖动 | `scheduler.py:124-149` |
 | **重试** | 按 HTTP 状态码配置 `max_retries`/`backoff_factor`，指数退避 | `downloader.py:88-98,289-359` |
 | **熔断** | 两套独立实现：Spider per-domain 状态机 + 中间件版 | `spider.py:70` / `middleware.py:87` |
-| **解析缓存** | `functools.lru_cache(1000)` 按内容 hash 缓存 + CSS/XPath 表达式缓存 | `parser.py:74,166,172` |
+| **解析缓存** | 实例级 `OrderedDict`（默认 1000 条）按内容 hash 缓存，每次返回深拷贝 + CSS/XPath 表达式缓存 | `parser.py:55,186,195` |
 | **信号系统** | 同步(Spider 内部) + 异步(全局 `signal_manager`)，两套并存 | `spider.py:24` / `libs/signals.py:27` |
 
 > ⚠️ **历史陷阱（已修正）**：`Downloader.get_stsats` 拼写错误已改为 `get_stats`；`exception_tracker` 全局实例已取消注释并强化 `track()` 以兼容普通 `Exception`；`pyyaml` 已加入 `pyproject.toml`/`setup.py` 依赖；`setup.py` 已对齐 `pyproject.toml`（httpx、Python>=3.12、版本 0.1.1）。剩余未声明依赖：`utils/statistic.py` 需要 `psutil`。详见 `AGENTS.md`。

@@ -86,12 +86,14 @@ stateDiagram-v2
 
 | 方法 | 签名 | 返回值 | 说明 | 证据 |
 |------|------|--------|------|------|
-| `parse` | `(content: str \| bytes, encoding=None)` | `etree._Element` | 解码、哈希、LRU 缓存解析 | `webants/parser.py:107-164` |
-| `css` | `(tree, selector) -> list` | 元素列表 | 表达式缓存；异常返回 `[]` | `webants/parser.py:178-195` |
-| `xpath` | `(tree, xpath) -> list` | 结果列表 | 表达式缓存；异常返回 `[]` | `webants/parser.py:197-214` |
-| `extract` | `(content, extractor, encoding=None)` | `Any` | 字符串以 `//` 开头走 XPath，否则 CSS；可传 callable | `webants/parser.py:216-242` |
-| `get_stats` | `() -> dict` | 统计 + cache_info | — | `webants/parser.py:244-255` |
-| `clear_caches` | `() -> None` | — | 清空文档/CSS/XPath 缓存 | `webants/parser.py:257-262` |
+| `parse` | `(content: str \| bytes, encoding=None)` | `etree._Element` | 解码、哈希、实例级缓存；每次返回深拷贝 | `webants/parser.py:106-184` |
+| `css` | `(tree, selector) -> list` | 元素列表 | 表达式缓存；异常返回 `[]` | `webants/parser.py:204-220` |
+| `xpath` | `(tree, xpath) -> list` | 结果列表 | 表达式缓存；异常返回 `[]` | `webants/parser.py:222-238` |
+| `extract` | `(content, extractor, encoding=None)` | `Any` | 字符串以 `//` 开头走 XPath，否则 CSS；可传 callable | `webants/parser.py:240-266` |
+| `get_stats` | `() -> dict` | 统计 + cache_info | 含 `cache_hits/cache_misses` 与兼容的 `cache_info` | `webants/parser.py:268-284` |
+| `clear_caches` | `() -> None` | — | 清空文档/CSS/XPath 缓存 | `webants/parser.py:286-291` |
+
+> Parser 缓存契约见 [ADR-0004](../adr/0004-data-correctness-link-filter-config-cache-signal.md)：缓存归实例所有，key 仅内容哈希；`parse()` 返回副本，调用方修改不会污染缓存；构造参数 `cache_size`（默认 1000，0 表示禁用）。
 
 ## 2.6 Request 接口
 
@@ -139,8 +141,8 @@ stateDiagram-v2
 | `MiddlewareManager` | `add_middleware`、`process_request`、`process_response`、`process_exception` | 否（`webants/libs/middleware.py:454-572`） |
 | `JsonPersister`/`CsvPersister`/`SqlitePersister` | `save`、`load`、`update_stats` | 否（`webants/libs/persister.py:94-605`） |
 | `PersisterManager` | `add_persister`、`save`、`load`、`sync`、`get_stats` | 否（`webants/libs/persister.py:476-605`） |
-| `SignalManager` | `register`、`connect`、`disconnect`、`send` | 否（`webants/libs/signals.py:165-256`） |
-| `Config` | `get`、`set`、`as_dict`、`save`、`load_config` | 否（`webants/libs/config.py:77-257`） |
+| `SignalManager` | `register`、`connect`、`disconnect`、`send` | 否（`webants/libs/signals.py:167-279`；排序语义见 ADR-0004） |
+| `Config` | `get`、`set`、`as_dict`、`save`、`load_config` | 否（`webants/libs/config.py:78-338`；嵌套合并与环境变量见 ADR-0004） |
 
 ## 2.10 错误处理
 
@@ -165,4 +167,4 @@ stateDiagram-v2
 - `close()` 会取消在飞任务（库只取消自己创建的任务）、`scheduler.discard_pending()` 归还排队凭据、关闭 client；重复/并发调用安全，且关闭后不可重启（[ADR-0003](../adr/0003-shutdown-cancellation-and-loop-quiescence.md)）。
 - `Downloader.start_downloader` 只取消本方法创建的 worker（`try/finally`），不再调用 `asyncio.all_tasks()`（`webants/downloader.py:457-472`）。
 - `Scheduler.schedule_request` 在入队前 `await asyncio.sleep(effective_delay)`（`webants/scheduler.py:145-150`），因此调度是串行的；`PriorityQueue.put` 在队列满时会一直等待（`:163`）。
-- 共享可变状态包括 `seen_urls`、`domain_stats`、`domain_semaphores`、`Parser._cached_parse` 的全局 LRU、`ExtractorFactory.extractors` 类字典；均无锁，依赖单事件循环串行执行。
+- 共享可变状态包括 `seen_urls`、`domain_stats`、`domain_semaphores`、`ExtractorFactory.extractors` 类字典；均无锁，依赖单事件循环串行执行。`Parser` 的文档缓存归实例所有（ADR-0004），不再跨实例共享。

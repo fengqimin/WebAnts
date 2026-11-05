@@ -122,9 +122,10 @@ flowchart TD
 |------|------|------|
 | `Downloader` 与回调契约 | `fetch` 只下载，Spider 统一调用并归一化回调 | 已按 ADR-0001 收敛（P0-01 Closed） |
 | `Scheduler` 与 `Spider` 生命周期 | 入队返回 `ScheduleSlot`，`process_request` 的 `finally` 释放；Spider 关闭时取消在飞并 `discard_pending()` | 槽位模型见 ADR-0002、关闭契约见 ADR-0003（P1-01/04、P2-20/23 Closed） |
-| `Parser` 类级缓存 | `lru_cache` 修饰实例方法，key 含 `self` | 实例无法回收、统计失真（P1-07） |
+| `Parser` 实例缓存 | `OrderedDict`，key 仅内容哈希，返回深拷贝 | 实例可回收、统计区分命中/未命中（P1-07、P2-17 Closed，ADR-0004） |
+| `Config` 嵌套合并 | `deepcopy` 默认值 + 递归深合并 + `__` 环境变量 | 嵌套键不再拍平，默认值不被实例污染（P1-06、P2-16 Closed，ADR-0004） |
 | `ExtractorFactory` 元类注册表 | 类字典全局可变，按前缀匹配 | 新增/重名提取器行为隐式 |
 | `utils/statistic.py` | 顶层 `import psutil` | 未安装即无法 import 整个模块（P2-06） |
-| `SignalManager` | 全局单例 + 同步/异步两套 | 事件语义分裂，注册顺序影响排序结果（P1-08） |
+| `SignalManager` | 全局单例 + 同步/异步两套 | 事件语义仍分裂；异步版改为高优先级先执行、同优先级按注册顺序（P1-08、P2-15 Closed，ADR-0004） |
 
 外部系统依赖只有两类：目标 HTTP 站点（`Downloader`）与可选的 Playwright 浏览器二进制（`utils/login.py`）。没有数据库服务、缓存服务或消息中间件。

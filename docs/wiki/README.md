@@ -6,7 +6,7 @@
 | 生成日期 | 2026-11-03；2026-11-05 同步 |
 | 文档范围 | `webants/`（全部 Python 源码）、`tests/`、`pyproject.toml`、`setup.py`、`requirements.txt`、`readme*.md`、`docs/architecture.md`、`example/use_item.py` |
 | 数据快照 | 仓库内无 SQLite 数据库文件；仅 `data/html/awesome-python.html`（约 152 KB 样例 HTML），未做行数统计 |
-| 运行验证 | `uv run pytest -q` → 124 passed（2026-11-05）；`uv run ruff check .` → 17 errors（全部既有 F401）；`uv run python -m isort --check-only .` → 17 个文件不合格、2 个跳过；`uv run black --check .` → 不可用；问题与修复状态见 [08](08-issues-and-recommendations.md) |
+| 运行验证 | `uv run pytest -q` → 155 passed（2026-11-05）；`uv run ruff check .` → 12 errors（剩余既有 F401）；`uv run python -m isort --check-only .` → 11 个文件不合格、2 个跳过；`uv run black --check .` → 不可用；问题与修复状态见 [08](08-issues-and-recommendations.md) |
 
 ## 这个项目是什么
 
@@ -24,7 +24,7 @@ WebAnts 是一个用 `httpx` + `lxml` 实现的异步爬虫框架。它把爬取
 | 入口 | 无 CLI、无 HTTP 服务；继承 `webants.spider.Spider` 并调用 `await spider.start()` |
 | 数据流 | `Spider → Scheduler → Downloader → Parser/回调 → Scheduler / Spider` |
 | 数据落盘 | `libs/persister.py` 的 JSON / CSV / SQLite（默认未接入 Spider） |
-| 测试 | `pytest` + `pytest-asyncio`（`asyncio_mode=auto`），9 个测试文件、124 个用例 |
+| 测试 | `pytest` + `pytest-asyncio`（`asyncio_mode=auto`），11 个测试文件、155 个用例 |
 | 代码规模 | 源码 + 测试共 9,396 行（`wc -l`） |
 
 ## 按角色阅读路径
@@ -78,7 +78,7 @@ WebAnts 是一个用 `httpx` + `lxml` 实现的异步爬虫框架。它把爬取
 # 安装依赖（本次未执行，标注为未验证）
 uv sync
 
-# 运行测试（已验证：124 passed）
+# 运行测试（已验证：155 passed）
 uv run pytest -q
 
 # 只跑某个测试文件

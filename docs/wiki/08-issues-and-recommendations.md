@@ -281,6 +281,8 @@ if self._tasks:
 
 ### P1-05 normalize=False 崩溃、normalize=True 不生效
 
+> **状态：Closed（2026-11-05）。** 修复依据 [ADR-0004](../adr/0004-data-correctness-link-filter-config-cache-signal.md)：判定统一走 `_LinkFilter`（输入为 URL 字符串），`normalize` 只决定输出是否重建为归一化 URL。
+
 `FilteringLinkExtractor.link_allowed`：
 
 ```python
@@ -304,6 +306,8 @@ if allowed and self.normalize:
 并让所有过滤函数统一接收 `str`，在最后一步再重建 `Link`。与 P1-15 ~ P1-17 一起测试。
 
 ### P1-06 Config 嵌套合并污染顶层
+
+> **状态：Closed（2026-11-05）。** 修复依据 [ADR-0004](../adr/0004-data-correctness-link-filter-config-cache-signal.md)：`deepcopy` 默认值 + 递归深合并；`as_dict()` 返回深拷贝。
 
 `_merge_config` 递归调用时始终使用 `self._config` 作为目标（`webants/libs/config.py:157-171`），而不是当前层级的 dict：
 
@@ -332,6 +336,8 @@ def _deep_merge(self, base: dict, patch: dict) -> None:
 
 ### P1-07 Parser 缓存统计失真与实例泄漏
 
+> **状态：Closed（2026-11-05）。** 修复依据 [ADR-0004](../adr/0004-data-correctness-link-filter-config-cache-signal.md)：缓存改为实例级 `OrderedDict`（key 仅内容哈希），新增 `cache_misses`，命中统计按实际命中累加。
+
 - `@functools.lru_cache` 修饰 `_cached_parse(self, content_hash, content)`（`webants/parser.py:74-76`），缓存 key 包含 `self`，Parser 实例无法被回收，多个实例共享同一个类级缓存；
 - 缓存 key 同时包含 hash 与全文，内容被保存两份；
 - `parse` 每次调用都 `cache_hits += 1`（`:159`），`css`/`xpath` 也无条件累加命中数（`:191,210`）。实测首次解析 `cache_hits=1`、`cache_info().hits=0`；
@@ -340,6 +346,8 @@ def _deep_merge(self, base: dict, patch: dict) -> None:
 **修复**：把缓存改为模块级函数或 `dict`，key 只用内容哈希；命中统计用 `cache_info()` 前后差值，或显式 `if hash in cache`；对返回树明确只读约定，必要时返回副本。
 
 ### P1-08 异步信号排序与优先级方向
+
+> **状态：Closed（2026-11-05）。** 修复依据 [ADR-0004](../adr/0004-data-correctness-link-filter-config-cache-signal.md)：接收器存 `(priority, seq, handler)`，按 `(-priority, seq)` 排序；高优先级先执行，同优先级按注册顺序。
 
 `Signal.send` 使用 `sorted(receivers)`（`webants/libs/signals.py:68`），receivers 是 `(priority, handler)` 元组。两个接收器优先级相同（默认都是 0）时，Python 会比较函数对象，抛 `TypeError: '<' not supported between instances of 'function' and 'function'`。同时升序排序与文档“higher = earlier”相反（`:92-105`）。
 
@@ -411,6 +419,8 @@ grep 结果显示，除 `libs/middleware.py:25` 引用 `libs/signals.py` 外，�
 
 ### P1-15 模块级链接过滤在无 hosts_allow 时恒为空
 
+> **状态：Closed（2026-11-05）。** 修复依据 [ADR-0004](../adr/0004-data-correctness-link-filter-config-cache-signal.md)：空 `hosts_allow` 时 host 检查直接通过，模块级与类级共用同一判定核心。
+
 `extract_and_filter_links._link_allowed` 同时执行：
 
 ```python
@@ -426,11 +436,15 @@ if not _host_allowed_lenient(host):
 
 ### P1-16 模块级空扩展名被误判
 
+> **状态：Closed（2026-11-05）。** 修复依据 [ADR-0004](../adr/0004-data-correctness-link-filter-config-cache-signal.md)：未配置 `extensions_allow` 时扩展名检查直接通过；扩展名按路径最后一段解析。
+
 模块级 `_extension_allowed` 对空扩展名返回 `False`（`webants/libs/extractor.py:253-259`），而 `http://example.com` 这类无路径 URL 的 `ext = ""`，会在第 335-336 行被拒绝。类实现的该函数在无 `extensions_allow` 时返回 `True`（`:823-829`），两者语义不一致。
 
 **修复**：模块级改为“无 `extensions_allow` 时直接放行；有 allow 列表时空扩展名才拒绝”，与类实现对齐。
 
 ### P1-17 类实现 lenient 模式的空配置问题
+
+> **状态：Closed（2026-11-05）。** 修复依据 [ADR-0004](../adr/0004-data-correctness-link-filter-config-cache-signal.md)：`lenient` 只改变比较方式，空列表仍放行；`lenient × hosts_allow` 四种组合已有参数化测试。
 
 `FilteringLinkExtractor._host_allowed_lenient` 在无 `hosts_allow` 时返回 `False`（`webants/libs/extractor.py:845-850`），而 `link_allowed` 在 `lenient=True` 时只检查 lenient 分支（`:909-918`）。因此 `FilteringLinkExtractor(lenient=True)` 若不配 `hosts_allow`，同样会拒绝所有链接。默认 `lenient=False`，所以该问题只在显式开启时触发。
 
@@ -549,9 +563,9 @@ await self.request_queue.put((request.priority, request))
 
 | ID | 证据 | 修复建议 |
 |----|------|----------|
-| P2-15 | `_get_receivers(None)` 返回 `receivers[None] + receivers[None]`（`webants/libs/signals.py:143-146`） | 对 `sender is None` 单独分支，避免同一处理器执行两次 |
-| P2-16 | 环境变量名不能含 `.`，`_set_nested_value` 却按 `.` 拆分（`webants/libs/config.py:122-137`） | 改用 `WEBANTS_DOWNLOADER__CONCURRENT_REQUESTS` 这类 `__` 分隔，或维护显式映射表 |
-| P2-17 | `lru_cache` 返回同一个可变 lxml 树（`webants/parser.py:74-96`） | 返回副本，或文档明确“解析树只读”，避免跨请求污染 |
+| P2-15 | `_get_receivers(None)` 返回 `receivers[None] + receivers[None]`（`webants/libs/signals.py:143-146`） | **Closed（2026-11-05，ADR-0004）**：`sender is None` 单独分支，只取一次 |
+| P2-16 | 环境变量名不能含 `.`，`_set_nested_value` 却按 `.` 拆分（`webants/libs/config.py:122-137`） | **Closed（2026-11-05，ADR-0004）**：改用 `__` 分隔；未知键忽略并告警，类型不匹配回退 |
+| P2-17 | `lru_cache` 返回同一个可变 lxml 树（`webants/parser.py:74-96`） | **Closed（2026-11-05，ADR-0004）**：`parse()` 每次返回深拷贝，缓存树不逃逸 |
 | P2-18 | `Request` 总是填充默认 headers（`webants/libs/request.py:105`），`_fetch` 的 `request.headers or self.headers` 永远取前者（`webants/downloader.py:219`） | 改为合并：`{**self.headers, **request.headers}`，或区分“显式 headers” |
 | P2-19 | `JsonPersister._write_batch` 每批全量读改写（`webants/libs/persister.py:181-202`），非原子 | 改 NDJSON 追加写，或临时文件 + `os.replace` 原子替换 |
 | P2-20 | `_processing` 以 URL 为 key（`webants/spider.py:357,387`），同 URL 并发时二次 remove 抛 KeyError | 改用请求对象引用或引用计数 |
@@ -572,7 +586,7 @@ await self.request_queue.put((request.priority, request))
 
 ## 8.9 技术债与测试缺口
 
-- **测试覆盖**：`spider.py`、`scheduler.py` 的部分、`downloader.py` 的重试分支、`persister.py`、`middleware.py`、`signals.py`、`config.py`、`utils/` 大多没有测试；`test_url.py` 只有陈旧 `.pyc`，没有源码。
+- **测试覆盖**：`config.py`、`signals.py` 已随 ADR-0004 补基础用例，`spider.py`/`scheduler.py`/`downloader.py` 主路径已有离线覆盖；`persister.py`、`middleware.py`、`utils/` 大多没有测试；`test_url.py` 只有陈旧 `.pyc`，没有源码。
 - **双实现**：两套 Signal、两套 CircuitBreaker，维护成本高；建议先统一接口，再合并实现。
 - **无类型检查**：没有 mypy/pyright 配置；大量 `Any` 与 `# type: ignore` 缺失。
 - **文档漂移**：`docs/architecture.md:234` 声称若干历史问题“已修正”，但本次实测仍存在回调契约、Config 合并等问题；`readme.md` 大段内容与代码无关。
@@ -600,20 +614,20 @@ await self.request_queue.put((request.priority, request))
 | 0 | 写 [ADR-0001](../adr/0001-callback-contract-and-retry-ownership.md)：确定回调契约、重试归属、失败信号（已完成 2026-11-04） | 避免后续反复改 | 文档评审通过，P0-01 方案冻结 |
 | 1 | P0-01、P1-03、P1-13、P1-14、P1-19 + `tests/test_spider.py`（已完成 2026-11-04） | 同一问题簇，必须一起改 | MockTransport 端到端：初始页 → 解析 2 个链接 → 抓取子页 → 产出 Result |
 | 2 | P1-01、P1-02、P1-04、P1-18、P1-20、P2-20、P2-23（已完成 2026-11-05） | 生命周期与资源泄漏 | 异常、取消、熔断三种场景下计数恢复；ADR-0002 落地槽位所有权，ADR-0003 落地关闭/取消/收敛契约 |
-| 3 | P1-05、P1-06、P1-07、P1-08、P1-15 ~ P1-17、P2-15 ~ P2-17 | 数据正确性 | 提取器矩阵、Config 合并、缓存统计、信号排序全部通过 |
+| 3 | P1-05、P1-06、P1-07、P1-08、P1-15 ~ P1-17、P2-15 ~ P2-17（已完成 2026-11-05，[ADR-0004](../adr/0004-data-correctness-link-filter-config-cache-signal.md)） | 数据正确性 | 提取器矩阵、Config 合并、缓存统计、信号排序全部通过 |
 | 4 | P1-09、P1-10、P1-11、P2-19 | 可选层接入与关闭语义 | flush 后条数一致；缓存命中语义明确；组装示例可运行 |
 | 5 | 其余 P2 + CI + 仓库卫生 | 收口 | `ruff`、`isort`、`pytest` 在 CI 全绿 |
 
 ## 8.12 验收清单
 
-- [ ] `uv run pytest -q` 无失败，且包含 `tests/test_spider.py`。
+- [x] `uv run pytest -q` 无失败，且包含 `tests/test_spider.py`（2026-11-05：155 passed）。
 - [ ] 子类以 `async def parse(...): yield ...` 定义时，`start_requests()` 不再触发 `AssertionError`。
 - [ ] 回调三种形态（async generator / 普通协程返回单值 / 抛异常）均有测试覆盖。
 - [ ] 用 mock HTTP 完成一次“初始页 → 解析出 2 个链接 → 抓取子页 → 产出 Result”的端到端测试。
 - [ ] 调度器在异常、取消、熔断三种场景下，`active_requests` 与域名信号量恢复到初始值。
-- [ ] `FilteringLinkExtractor(normalize=False)` 不再抛异常；`normalize=True` 的返回 URL 已归一化。
-- [ ] `extract_and_filter_links` 在不传 `hosts_allow`/`extensions_allow` 时返回非空结果。
-- [ ] `Config` 加载嵌套 YAML 后，顶层不出现子键，默认值保持不变；环境变量可覆盖嵌套键。
+- [x] `FilteringLinkExtractor(normalize=False)` 不再抛异常；`normalize=True` 的返回 URL 已归一化。
+- [x] `extract_and_filter_links` 在不传 `hosts_allow`/`extensions_allow` 时返回非空结果。
+- [x] `Config` 加载嵌套 YAML 后，顶层不出现子键，默认值保持不变；环境变量可覆盖嵌套键。
 - [ ] Persister 在进程退出前能 flush 全部缓存；SQLite 行数与 `save` 次数一致。
 - [ ] `black --check`、`ruff check`、`isort --check` 在 CI 中可稳定运行（版本固定）。
 - [ ] README 与 `docs/architecture.md` 的能力描述与运行路径一致（不再声称未接入的层已生效）。
@@ -639,10 +653,18 @@ await self.request_queue.put((request.priority, request))
 | P2-22 | **Closed** | `request_scheduled` 仅在真正入队后由 `_schedule` 发送。`test_scheduled_signal_fires_only_for_queued_requests` |
 | P2-23 | **Closed** | `close()` 与 `_running` 解耦、幂等、并发安全，未启动也释放 client。`test_close_before_start_releases_resources`、`test_close_is_idempotent_and_concurrent_safe` |
 | P1-12 | **Closed** | 修 `test_invalid_html`：`_Item.html` 增加类型校验（`str`/`etree._Element`/`None`，否则 `TypeError`），并补齐合法输入断言；主链路由 `tests/test_spider.py` 覆盖。`tests/test_item.py` 6 passed |
-| P1-05 / P1-06 / P1-07 / P1-08 / P1-09 / P1-10 / P1-11 / P1-15 / P1-16 / P1-17 | Open | 按 8.11 第 3–5 阶段推进 |
-| P2-02 ~ P2-19、P2-21 | Open | 按 8.11 第 3/5 阶段收口 |
+| P1-05 | **Closed** | 新增共享 `_LinkFilter`（输入恒为 `str`）；判定用 canonical URL，`normalize` 只决定输出是否重建。`test_filtering_link_extractor_normalize_false`、`test_filtering_link_extractor_normalize_true_rewrites_output` |
+| P1-06 | **Closed** | `deepcopy(DEFAULT_CONFIG)` + `_deep_merge`；`as_dict()` 返回深拷贝。`tests/test_config.py` |
+| P1-07 | **Closed** | 实例级 `OrderedDict`、key 仅内容哈希；首次解析计 miss，新增 `cache_misses`。`test_parser_cache_hit_statistics`、`test_parser_advanced_caching` |
+| P1-08 | **Closed** | 接收器 `(priority, seq, handler)`，按 `(-priority, seq)` 排序。`tests/test_signals.py` |
+| P1-15 / P1-16 / P1-17 | **Closed** | 空配置放行；无路径 URL 不再被扩展名检查误杀；`lenient × hosts_allow` 四种组合覆盖。`test_lenient_host_matrix` 等 |
+| P2-15 / P2-16 / P2-17 | **Closed** | `send(None)` 只执行一次；环境变量改为 `__` 分层并做类型守卫；解析树每次返回深拷贝。`tests/test_signals.py`、`tests/test_config.py`、`test_parser_cache_returns_independent_trees` |
+| P1-09 / P1-10 / P1-11 | Open | 按 8.11 第 4 阶段推进 |
+| P2-02 ~ P2-14、P2-18 ~ P2-19、P2-21 | Open | 按 8.11 第 3/5 阶段收口（P2-03 仅模块级 scheme deny 已随 ADR-0004 修正，其余两项仍 Open） |
 
-当前测试基线：`uv run pytest -q` → `124 passed`。`tests/test_spider.py`、`tests/test_downloader.py`、`tests/test_request.py`、`tests/test_scheduler.py`、`tests/test_item.py` 全部通过且不访问网络。`ruff check` 仍为 17 个 `F401`；`isort` 需用 `uv run python -m isort`（CLI 入口报 `Failed to canonicalize script path`）。
+阶段 3（P1-05/06/07/08/15/16/17、P2-15/16/17）的依据是 [ADR-0004](../adr/0004-data-correctness-link-filter-config-cache-signal.md)（Accepted，2026-11-05，含 E1–E15 实测证据），已于 2026-11-05 按 T1–T6 实施完成。
+
+当前测试基线：`uv run pytest -q` → `155 passed`。`tests/test_spider.py`、`tests/test_downloader.py`、`tests/test_request.py`、`tests/test_scheduler.py`、`tests/test_item.py`、`tests/test_extractor.py`、`tests/test_parser.py`、`tests/test_config.py`、`tests/test_signals.py` 全部通过且不访问网络。`isort` 需用 `uv run python -m isort`（CLI 入口报 `Failed to canonicalize script path`）。
 
 ## 附录 A 原版勘误表
 

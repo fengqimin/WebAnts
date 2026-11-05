@@ -75,18 +75,18 @@
 
 | 符号 | 类型 | 位置 | 用途 | 调用方 |
 |------|------|------|------|--------|
-| `Parser` | class | `webants/parser.py:26` | HTML 解析器 | `Spider.__init__` |
-| `Parser.__init__` | method | `:29` | 配置 `HTMLParser`、缓存、统计 | `Spider.__init__` |
-| `Parser._get_content_hash` | method | `:68` | SHA-1 内容哈希 | `parse` |
-| `Parser._cached_parse` | method（lru_cache） | `:74` | 带缓存的 `fromstring` | `parse` |
-| `Parser.parse` | method | `:107` | 解码 + 缓存解析 | 外部、`extract` |
-| `Parser._get_cached_css` | method | `:166` | CSS 表达式缓存 | `css` |
-| `Parser._get_cached_xpath` | method | `:172` | XPath 表达式缓存 | `xpath` |
-| `Parser.css` | method | `:178` | CSS 查询 | 外部、`extract` |
-| `Parser.xpath` | method | `:197` | XPath 查询 | 外部、`extract` |
-| `Parser.extract` | method | `:216` | 解析 + 选择一步完成 | 外部 |
-| `Parser.get_stats` | method | `:244` | 统计 + `cache_info` | `Spider.get_stats` |
-| `Parser.clear_caches` | method | `:257` | 清空三类缓存 | 测试、外部 |
+| `Parser` | class | `webants/parser.py:27` | HTML 解析器 | `Spider.__init__` |
+| `Parser.__init__` | method | `:30` | 配置 `HTMLParser`、实例缓存、统计 | `Spider.__init__` |
+| `Parser._get_content_hash` | method | `:76` | SHA-1 内容哈希 | `parse` |
+| `Parser._parse_content` | method | `:82` | 无缓存 `fromstring` | `parse` |
+| `Parser.parse` | method | `:106` | 解码 + 实例缓存（每次返回深拷贝） | 外部、`extract` |
+| `Parser._get_cached_css` | method | `:186` | CSS 表达式缓存 | `css` |
+| `Parser._get_cached_xpath` | method | `:195` | XPath 表达式缓存 | `xpath` |
+| `Parser.css` | method | `:204` | CSS 查询 | 外部、`extract` |
+| `Parser.xpath` | method | `:222` | XPath 查询 | 外部、`extract` |
+| `Parser.extract` | method | `:240` | 解析 + 选择一步完成 | 外部 |
+| `Parser.get_stats` | method | `:268` | 统计 + `cache_info` 投影 | `Spider.get_stats` |
+| `Parser.clear_caches` | method | `:286` | 清空三类缓存 | 测试、外部 |
 
 ## 9.5 `webants/libs/request.py`
 
@@ -147,8 +147,9 @@
 | `iter_elements` | function | `:59` | 按 tags/attr 迭代元素 | `find_elements` |
 | `find_elements` | function | `:90` | CSS/XPath/tags 统一查找 | 多个 extract 函数 |
 | `extract_attrib` | function | `:139` | 批量取属性 | 外部 |
-| `extract_links` | function | `:174` | 批量取 `Link` | `extract_and_filter_links` |
-| `extract_and_filter_links` | function | `:224` | 模块级链接过滤 | 外部 |
+| `extract_links` | function | `:173` | 批量取 `Link` | `extract_and_filter_links` |
+| `_LinkFilter` | class | `:239` | 共享过滤核心（输入恒为 URL 字符串） | 模块级函数、`FilteringLinkExtractor` |
+| `extract_and_filter_links` | function | `:354` | 模块级链接过滤（新增 `lenient`） | 外部 |
 | `extract_text` | function | `:360` | 批量取文本 | 外部 |
 | `get_base_url` | function | `:402` | 取 `<base href>` | 外部 |
 | `get_html_title` | function | `:409` | 取 `<title>` | 外部 |
@@ -158,10 +159,10 @@
 | `BaseExtractor` | class | `:462` | 提取器基类 | 所有提取器 |
 | `_LxmlElementExtractor` | class | `:485` | lxml 查找 + 提取模板 | `AttribExtractor` 等 |
 | `AttribExtractor` | class | `:617` | 取单个属性 | `AttrItem` |
-| `LinkExtractor` | class | `:659` | 取 `Link` | `FilteringLinkExtractor` |
+| `LinkExtractor` | class | `:705` | 取 `Link` | `FilteringLinkExtractor` |
 | `ElementExtractor` | class | `:708` | 返回元素 | `ElementItem` |
 | `TextExtractor` | class | `:720` | 返回文本 | `TextItem` |
-| `FilteringLinkExtractor` | class | `:759` | 链接过滤 | `LinkItem` |
+| `FilteringLinkExtractor` | class | `:805` | 链接过滤（委托 `_LinkFilter`） | `LinkItem` |
 | `RegexExtractor` | class | `:952` | 空实现（`pass`） | 无 |
 
 ## 9.9 `webants/libs/middleware.py`
@@ -189,10 +190,11 @@
 
 | 符号 | 类型 | 位置 | 用途 | 调用方 |
 |------|------|------|------|--------|
-| `Signal` | class | `webants/libs/signals.py:27` | 异步信号 | 标准信号、`SignalManager` |
-| `Signal.send` | async method | `:46` | 按优先级调用接收器 | `SignalManager.send` |
-| `Signal.connect` | method | `:87` | 注册协程接收器 | `SignalManager.connect` |
-| `SignalManager` | class | `:165` | 信号注册表 | `signal_manager` |
+| `Signal` | class | `webants/libs/signals.py:25` | 异步信号 | 标准信号、`SignalManager` |
+| `Signal.send` | async method | `:46` | 按 `(-priority, seq)` 调用接收器 | `SignalManager.send` |
+| `Signal.connect` | method | `:87` | 注册协程接收器并分配自增序号 | `SignalManager.connect` |
+| `Signal._get_receivers` | method | `:130` | 合并具体 sender 与全局接收器（`None` 只取一次） | `send` |
+| `SignalManager` | class | `:167` | 信号注册表 | `signal_manager` |
 | `signal_manager` | instance | `:260` | 全局单例 | `middleware.py:25` |
 | 标准信号 | constants | `:263-273` | `spider_opened` 等 11 个 | 注册循环 `:276-277` |
 
@@ -201,16 +203,19 @@
 | 符号 | 类型 | 位置 | 用途 | 调用方 |
 |------|------|------|------|--------|
 | `DEFAULT_CONFIG` | constant | `webants/libs/config.py:18` | 全部默认配置 | `Config` |
-| `Config` | class | `:77` | 配置管理 | 外部（未接入） |
-| `Config.load_config` | method | `:101` | 读取 YAML | `__init__` |
-| `Config._load_env_vars` | method | `:122` | 读取 `WEBANTS_*` | `__init__` |
-| `Config._set_nested_value` | method | `:129` | 点分 key 写值 + 类型转换 | `set`、`_load_env_vars` |
-| `Config._merge_config` | method | `:157` | 递归合并（有缺陷） | `load_config` |
-| `Config._validate_config` | method | `:173` | 范围校验与路径绝对化 | `__init__`、`set` |
-| `Config.get` | method | `:200` | 点分 key 读取 | 外部 |
-| `Config.set` | method | `:219` | 写值并校验 | 外部 |
-| `Config.as_dict` | method | `:229` | 浅拷贝配置 | 外部 |
-| `Config.save` | method | `:237` | 写 YAML | 外部 |
+| `Config` | class | `:78` | 配置管理 | 外部（未接入） |
+| `Config.load_config` | method | `:102` | 读取 YAML | `__init__` |
+| `Config._load_env_vars` | method | `:123` | 读取 `WEBANTS_*`（`__` 分层） | `__init__` |
+| `Config._set_nested_value` | method | `:146` | 点分 key 写值 + 环境变量类型守卫 | `set`、`_load_env_vars` |
+| `Config._coerce_scalar` | method | `:195` | 环境变量标量转换 | `_set_nested_value` |
+| `Config._types_match` | method | `:211` | 环境变量类型兼容判断 | `_set_nested_value` |
+| `Config._deep_merge` | method | `:221` | 递归深合并到当前层级 | `_merge_config` |
+| `Config._merge_config` | method | `:229` | 深合并入口 | `load_config` |
+| `Config._validate_config` | method | `:237` | 类型/范围校验与路径绝对化 | `__init__`、`set` |
+| `Config.get` | method | `:281` | 点分 key 读取 | 外部 |
+| `Config.set` | method | `:300` | 写值并校验 | 外部 |
+| `Config.as_dict` | method | `:310` | 深拷贝配置 | 外部 |
+| `Config.save` | method | `:318` | 写 YAML | 外部 |
 | `config` | instance | `:260` | 全局单例 | 无内部调用 |
 
 ## 9.13 `webants/libs/exceptions.py`
@@ -263,12 +268,14 @@
 | `tests/test_downloader.py` | 14（含参数化） | `Downloader.fetch` 重试/退避/`Retry-After`/body/cookies/统计、worker 取消边界 | 全部使用 `httpx.MockTransport`，不访问网络 |
 | `tests/test_request.py` | 9 | 回调双类型、errback、`cb_kwargs` 校验 | 覆盖 C1 契约 |
 | `tests/test_spider.py` | 24 | 主链路、异步生成器/协程回调、errback、下载失败、关闭/取消/`idle_grace` | 覆盖 C3/C6 与 ADR-0003 E1–E5，全部离线 |
-| `tests/test_extractor.py` | 20（含参数化） | 函数式提取、四类 Extractor、工厂、Link 变体 | 覆盖 `FilteringLinkExtractor` 默认 normalize |
+| `tests/test_config.py` | 10 | 深合并、默认值隔离、`__` 环境变量、类型守卫、`as_dict` 深拷贝 | ADR-0004 |
+| `tests/test_extractor.py` | 30（含参数化） | 函数式提取、四类 Extractor、工厂、Link 变体、normalize/lenient 矩阵 | ADR-0004 |
 | `tests/test_item.py` | 6 | 四类 Item + 四类 Descriptor；`html` 类型校验 | 非法类型抛 `TypeError` |
-| `tests/test_parser.py` | 18（含参数化） | 解析、选择器、缓存、错误 | 覆盖编码/超限/空内容 |
+| `tests/test_parser.py` | 22（含参数化） | 解析、选择器、缓存命中/miss、返回副本、容量淘汰、错误 | 覆盖编码/超限/空内容 |
+| `tests/test_signals.py` | 7 | 同优先级顺序、优先级方向、`sender=None`、禁用/断开 | ADR-0004 |
 | `tests/test_result.py` | 13 | `Field` / `Result` | 覆盖校验与序列化 |
 | `tests/test_scheduler.py` | 20 | 初始化、去重、上限、并发、完成、统计、延迟、slot 对账 | 域名并发用 `asyncio.wait` |
 | `tests/conftest.py` | — | `http_client`、`sample_html` fixture | 将仓库根加入 `sys.path` |
 | `example/use_item.py` | — | `LinkItemDescriptor` / `TextItemDescriptor` | import 即执行 |
 
-合计 124 个测试用例（`uv run pytest -q` 报告 `124 passed`）。
+合计 155 个测试用例（`uv run pytest -q` 报告 `155 passed`，2026-11-05）。

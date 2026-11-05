@@ -18,7 +18,7 @@ flowchart TD
     Script["调用方脚本 / Spider 子类"] --> SP["Spider<br/>生命周期 + 统计 + 熔断"]
     SP --> SCH["Scheduler<br/>PriorityQueue + 去重 + 域名信号量"]
     SP --> DL["Downloader<br/>httpx.AsyncClient"]
-    SP --> PS["Parser<br/>lxml + LRU"]
+    SP --> PS["Parser<br/>lxml + 实例缓存"]
     SCH --> Q["asyncio.PriorityQueue"]
     DL --> NET["外部 HTTP/HTTPS 站点"]
     PS --> EXT["Item / Extractor<br/>可选提取层"]
@@ -39,12 +39,12 @@ flowchart TD
 | 入口/生命周期 | `Spider.__init__`、`start`、`close`、`get_stats` | 是 | `webants/spider.py:143-652` |
 | 调度 | `Scheduler` | 是 | `webants/scheduler.py:21-208` |
 | 下载 | `BaseDownloader`、`Downloader` | 是 | `webants/downloader.py:22-418` |
-| 解析 | `Parser` | 是（需调用方显式使用） | `webants/parser.py:26-262` |
+| 解析 | `Parser` | 是（需调用方显式使用） | `webants/parser.py:26-291` |
 | 数据抽象 | `Request`、`Result`、`Field`、`Item`、`Extractor` | 部分（`Request` 必用） | `webants/libs/` |
 | 中间件 | `MiddlewareManager` 及四个实现 | 否 | `webants/libs/middleware.py:454-572` |
 | 持久化 | `JsonPersister`、`CsvPersister`、`SqlitePersister` | 否 | `webants/libs/persister.py:94-605` |
-| 事件 | 同步 `Signal`（spider）、异步 `SignalManager`（libs） | 同步版是；异步版否 | `webants/spider.py:24-67`、`webants/libs/signals.py:27-277` |
-| 配置/异常 | `Config`、异常层级、`ExceptionTracker` | 异常类是；Config 否 | `webants/libs/config.py:77-260`、`webants/libs/exceptions.py:41-416` |
+| 事件 | 同步 `Signal`（spider）、异步 `SignalManager`（libs） | 同步版是；异步版否 | `webants/spider.py:24-67`、`webants/libs/signals.py:26-279` |
+| 配置/异常 | `Config`、异常层级、`ExceptionTracker` | 异常类是；Config 否 | `webants/libs/config.py:78-341`、`webants/libs/exceptions.py:41-416` |
 | 工具 | 日志、URL、misc、statistic、login | 部分是 | `webants/utils/` |
 
 ## 1.4 核心数据流
@@ -126,15 +126,15 @@ flowchart TD
 | `webants/spider.py` | 生命周期、信号、熔断、统计、回调归一化 | `Spider.start` `:524` |
 | `webants/scheduler.py` | 队列、去重、域名并发、延迟 | `Scheduler.schedule_request` `:78` |
 | `webants/downloader.py` | HTTP、重试、退避、`Retry-After`、统计 | `Downloader.fetch` `:335` |
-| `webants/parser.py` | 解析、缓存、选择器 | `Parser.parse` `:107` |
+| `webants/parser.py` | 解析、缓存、选择器 | `Parser.parse` `:106` |
 | `webants/libs/request.py` | 请求模型与校验 | `Request.__init__` `:55` |
 | `webants/libs/result.py` | 结果与字段模型 | `Result.__init__` `:68` |
 | `webants/libs/item.py` | 描述符式提取 | `LinkItem` `:106` |
-| `webants/libs/extractor.py` | 提取器与链接过滤 | `FilteringLinkExtractor` `:759` |
+| `webants/libs/extractor.py` | 提取器与链接过滤 | `FilteringLinkExtractor` `:805`；共享核心 `_LinkFilter` `:239` |
 | `webants/libs/middleware.py` | 中间件链（未接入） | `MiddlewareManager` `:454` |
 | `webants/libs/persister.py` | 存储后端（未接入） | `PersisterManager` `:476` |
-| `webants/libs/signals.py` | 异步信号（未接入） | `signal_manager` `:260` |
-| `webants/libs/config.py` | 配置（未接入） | `config` `:260` |
+| `webants/libs/signals.py` | 异步信号（未接入） | `signal_manager` `:262` |
+| `webants/libs/config.py` | 配置（未接入） | `config` `:341` |
 | `webants/libs/exceptions.py` | 异常与追踪 | `exception_tracker` `:416` |
 | `webants/utils/url.py` | URL 归一化/指纹 | `normalize_url` `:67` |
 | `tests/` | 单元测试 | `tests/conftest.py:15-35` |
@@ -148,7 +148,7 @@ flowchart TD
 | `lxml` + `cssselect` | 解析快、CSS/XPath 都支持 | 依赖 C 扩展；`etree.HTML` 宽松解析会掩盖坏文档 |
 | `pydantic` v2 | `Field` 自动校验、`model_dump` 序列化 | 每个字段都是模型对象，批量数据内存开销高 |
 | 自建 `PriorityQueue` 调度 | 完全控制优先级、去重、域名并发 | 无持久化，进程退出即丢；`put` 可能阻塞 |
-| 双 Signal 体系 | 同步版简单，异步版支持优先级 | 两套 API 易混用，事件语义不统一 |
+| 双 Signal 体系 | 同步版简单，异步版支持优先级 | 两套 API 易混用；异步版已改为稳定排序（高优先级先执行，同优先级按注册顺序） |
 | JSON/CSV/SQLite 三种持久化 | 覆盖调试、导出、轻量查询 | 均无 flush/close，尾部数据会丢 |
 | 元类自动注册 Extractor | 新增提取器无需改工厂 | 名字前缀匹配，隐式约定；`RegexExtractor` 仍是空实现 |
 
@@ -160,11 +160,12 @@ flowchart TD
 | 调度器持有域名信号量 | Downloader 内限流 | 信号量在入队前 acquire，队列满时阻塞且异常路径不释放（P1-04） |
 | `Request.__lt__` 反转比较 | 常规小值优先 | 数值越大越先出队；重试 `priority += 10` 实际提高优先级，与注释矛盾（P2-02） |
 | 保留两套熔断器 | 统一为一套 | `spider.py` 与 `middleware.py` 各一份，状态互不共享 |
-| 保留两套信号 | 统一为异步一套 | `Spider` 用同步、`libs` 用异步；异步版未接入主链路 |
+| 保留两套信号 | 统一为异步一套 | `Spider` 用同步、`libs` 用异步；异步版未接入主链路，但排序语义已稳定（ADR-0004） |
+| 数据路径统一中间表示 | 各入口各自维护过滤/合并/缓存逻辑 | ADR-0004 冻结：过滤只接受 URL 字符串、Config 递归深合并、Parser 实例缓存返回副本、信号按 `(-priority, seq)` 排序 |
 | 可选层不接入 Spider | 构造函数注入 | 使用方必须自行组装，默认行为与文档中的“支持中间件/持久化”不一致 |
 | 解析结果用 pydantic `Field` 包装 | 直接存原始值 | 每个值带 source/extractor/timestamp/metadata，便于溯源但体积大 |
 
-> 回调契约与重试归属的正式决策见 [ADR-0001](../adr/0001-callback-contract-and-retry-ownership.md)（Accepted，2026-11-04）。本节中与 P0-01 相关的取舍以 ADR 为准。
+> 回调契约与重试归属的正式决策见 [ADR-0001](../adr/0001-callback-contract-and-retry-ownership.md)（Accepted，2026-11-04）；数据正确性契约见 [ADR-0004](../adr/0004-data-correctness-link-filter-config-cache-signal.md)（Accepted，2026-11-05）。本节中与 P0-01、P1-05~08、P1-15~17、P2-15~17 相关的取舍以对应 ADR 为准。
 
 ## 1.8 非功能特性
 
