@@ -150,6 +150,7 @@ class Spider:
         log_level: int = logging.INFO,
         failure_threshold: int = 5,
         recovery_timeout: float = 60.0,
+        idle_grace: float = 0.5,
         **kwargs,
     ):
         """Initialize spider with configuration.
@@ -162,6 +163,9 @@ class Spider:
             log_level: Logging level
             failure_threshold: Number of failures before circuit breaker opens
             recovery_timeout: Time before circuit breaker attempts recovery
+            idle_grace: Seconds the queue and the in-flight table must stay
+                empty before the main loop exits. 0 exits as soon as both are
+                empty (useful in tests).
             **kwargs: Additional configuration
         """
         self.logger = get_logger(self.name, log_level=log_level)
@@ -193,6 +197,13 @@ class Spider:
         self._stop_future: Optional[asyncio.Future] = None
         self._domain_circuits: Dict[str, CircuitBreaker] = {}
 
+        # Lifecycle: shutdown state, close serialization and the activity clock
+        # the main loop uses to decide when the crawl has gone quiet.
+        self.idle_grace = idle_grace
+        self._last_activity = 0.0
+        self._closed = False
+        self._close_lock = asyncio.Lock()
+
         # Statistics and monitoring
         self.stats = {
             "start_time": None,
@@ -201,6 +212,8 @@ class Spider:
             "completed_requests": 0,
             "successful_requests": 0,
             "failed_requests": 0,
+            "cancelled_requests": 0,
+            "unhandled_task_errors": 0,
             "items_scraped": 0,
             "retry_count": 0,
             "circuits_open": 0,
@@ -375,15 +388,24 @@ class Spider:
             f"an async iterable, or None"
         )
 
-    async def _schedule(self, request: Request) -> ScheduleResult:
+    async def _schedule(self, request: Request) -> Optional[ScheduleResult]:
         """Hand a request to the scheduler and report the honest outcome.
 
         ``request_scheduled`` is emitted only when the request really entered
         the queue, so domain statistics and listeners describe actual scheduling
         instead of every request that reached ``process_request``.
+
+        Returns:
+            Optional[ScheduleResult]: None when the spider is already closed and
+            the request was dropped without touching the scheduler.
         """
+        if self._closed:
+            self.logger.warning(f"Spider is closed, request dropped: {request.url}")
+            return None
+
         result = await self.scheduler.schedule_request(request)
         if result:
+            self._last_activity = time.monotonic()
             self.signals.send("request_scheduled", self, request=request)
         elif result.reason is ScheduleReason.QUEUE_FULL:
             self.logger.warning(f"Queue full, request dropped: {request.url}")
@@ -478,18 +500,43 @@ class Spider:
                 self.stats["avg_request_time"] * (total_requests - 1) + elapsed
             ) / total_requests
 
-    def _forget_task(self, task: asyncio.Task) -> None:
-        """Drop a finished task from the in-flight table."""
+    def _on_task_done(self, task: asyncio.Task) -> None:
+        """Retire a finished task and observe how it ended.
+
+        ``asyncio`` invokes done callbacks synchronously, so this must stay a
+        plain function. ``process_request`` already handles ``Exception``; what
+        reaches here is either a cancellation or an escaped ``BaseException``.
+        Consuming the exception keeps the event loop from printing
+        ``Task exception was never retrieved`` when the task is collected.
+        """
         self._inflight.pop(task, None)
+        self._last_activity = time.monotonic()
+
+        if task.cancelled():
+            self.stats["cancelled_requests"] += 1
+            return
+
+        exc = task.exception()
+        if exc is not None:
+            self.stats["unhandled_task_errors"] += 1
+            self.logger.error(f"Unhandled task error: {exc!r}", exc_info=exc)
 
     async def start(self) -> None:
-        """Start the spider with monitoring."""
+        """Start the spider with monitoring.
+
+        Raises:
+            RuntimeError: when the spider has already been closed. Shutdown is
+                terminal; construct a new instance to crawl again.
+        """
+        if self._closed:
+            raise RuntimeError("Spider has been closed; create a new instance")
         if self._running:
             return
 
         self._running = True
         self._start_time = time.time()
         self.stats["start_time"] = self._start_time
+        self._last_activity = time.monotonic()
         self.signals.send("spider_started", self)
 
         try:
@@ -502,14 +549,18 @@ class Spider:
             while self._running:
                 slot = await self.scheduler.get_request()
                 if slot is None:
-                    # An empty poll does not mean done: the pause it applied
-                    # lets running callbacks push new requests in. Quiescence
-                    # requires the queue to be empty as observed now, with no
-                    # task left that could still enqueue one.
-                    if not self._inflight and self.scheduler.request_queue.empty():
+                    # An empty poll does not mean done: a background producer
+                    # may enqueue moments later. Quiescence requires no
+                    # in-flight task and no activity for ``idle_grace``.
+                    if (
+                        not self._inflight
+                        and time.monotonic() - self._last_activity
+                        >= self.idle_grace
+                    ):
                         break
                     continue
 
+                self._last_activity = time.monotonic()
                 request = slot.request
                 try:
                     task = asyncio.create_task(
@@ -522,7 +573,8 @@ class Spider:
                 # Registered before yielding, so the exit check can never see
                 # an empty in-flight table while this request is still running.
                 self._inflight[task] = request
-                task.add_done_callback(self._forget_task)
+                self._last_activity = time.monotonic()
+                task.add_done_callback(self._on_task_done)
 
         except Exception as e:
             self.logger.error(f"Spider error: {str(e)}")
@@ -530,22 +582,63 @@ class Spider:
             await self.close()
 
     async def close(self) -> None:
-        """Clean up resources and save stats."""
-        if not self._running:
+        """Release every resource owned by the spider.
+
+        Idempotent, re-entrant and valid before ``start()``. Order matters:
+        stop producing, cancel in-flight work, drain the queue, then close the
+        HTTP client, then announce — listeners observe a fully closed spider.
+        """
+        if self._closed:
             return
 
-        self._running = False
-        self.stats["finish_time"] = time.time()
+        async with self._close_lock:
+            if self._closed:
+                return
 
-        await self.downloader.close()
+            # 1. The loop must not create tasks while we cancel them.
+            self._running = False
+            if self.stats["finish_time"] is None:
+                self.stats["finish_time"] = time.time()
 
-        duration = self.stats["finish_time"] - self.stats["start_time"]
-        self.logger.info(
-            f"Spider {self.name} closed: "
-            f"crawled {self.stats['successful_requests']} pages in {duration:.2f}s"
-        )
+            # 2. Cancel in-flight work. Each task releases its slot in
+            # ``process_request``'s finally block; done callbacks clear the
+            # registry and count the cancellation.
+            inflight = list(self._inflight)
+            for task in inflight:
+                task.cancel()
+            if inflight:
+                await asyncio.gather(*inflight, return_exceptions=True)
+                for task in inflight:
+                    self._inflight.pop(task, None)
 
-        self.signals.send("spider_stopped", self)
+            # 3. Hand back every queued permit nobody will consume.
+            self.scheduler.discard_pending()
+
+            # 4. No task needs the network anymore.
+            await self.downloader.close()
+
+            # 5. Announce exactly once.
+            self.signals.send("spider_stopped", self)
+
+            # 6. Terminal state.
+            self._closed = True
+
+            if self._start_time:
+                duration = self.stats["finish_time"] - self._start_time
+                self.logger.info(
+                    f"Spider {self.name} closed: "
+                    f"crawled {self.stats['successful_requests']} pages in {duration:.2f}s"
+                )
+            else:
+                self.logger.info(f"Spider {self.name} closed before it started")
+
+    async def __aenter__(self) -> "Spider":
+        """Enter the context manager without starting the crawl."""
+        return self
+
+    async def __aexit__(self, exc_type, exc, tb) -> None:
+        """Guarantee shutdown on context exit."""
+        await self.close()
 
     def get_stats(self) -> dict:
         """Get comprehensive spider statistics.
@@ -560,6 +653,7 @@ class Spider:
             "downloader_stats": self.downloader.stats,
             "processing": [request.url for request in self._inflight.values()],
             "inflight_count": len(self._inflight),
+            "closed": self._closed,
             "circuits": {
                 domain: cb.state for domain, cb in self._domain_circuits.items()
             },

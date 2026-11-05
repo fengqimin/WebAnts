@@ -267,3 +267,23 @@ async def test_fetch_retry_alias_delegates_to_fetch(downloader):
 
     assert resp.status_code == 200
     assert downloader.stats["total_attempts"] == 1
+
+
+@pytest.mark.asyncio
+async def test_start_downloader_does_not_cancel_host_tasks(downloader):
+    """E3: only self-created workers are cancelled, never the caller's tasks"""
+    await install_handler(downloader, sequence_handler(200))
+
+    host = asyncio.create_task(asyncio.sleep(30))
+    downloader.request_queue.put_nowait(
+        (0, Request(url="http://example.com/worker-mode"))
+    )
+
+    try:
+        await asyncio.wait_for(downloader.start_downloader(2), timeout=5)
+
+        assert host.cancelled() is False
+        assert host.done() is False
+    finally:
+        host.cancel()
+        await asyncio.gather(host, return_exceptions=True)

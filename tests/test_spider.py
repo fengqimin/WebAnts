@@ -1,4 +1,5 @@
 import asyncio
+import time
 from contextlib import asynccontextmanager
 from unittest.mock import AsyncMock
 
@@ -129,6 +130,19 @@ class SingleResultSpider(Spider):
             fields={"path": response.url.path},
             url=str(response.url),
         )
+
+
+class Escaped(BaseException):
+    """BaseException subclass: not caught by process_request's except Exception."""
+
+
+class EscapingSpider(Spider):
+    name = "escaping"
+    start_urls = ["http://example.com/"]
+
+    async def parse(self, response, **kwargs):
+        raise Escaped("escaped from callback")
+        yield  # pragma: no cover - keeps parse an async generator
 
 
 @pytest.mark.asyncio
@@ -455,3 +469,164 @@ async def test_closing_releases_queued_slots():
         assert spider.scheduler.discard_pending() == 3
 
         assert spider.scheduler.audit()["idle"] is True
+
+
+@pytest.mark.asyncio
+async def test_close_before_start_releases_resources():
+    """E1: close() must work without start() and announce exactly once"""
+    spider = NoopSpider()
+    stopped = []
+    spider.signals.connect("spider_stopped", lambda sender: stopped.append(sender))
+
+    assert spider.downloader.client.is_closed is False
+
+    await spider.close()
+
+    assert spider.downloader.client.is_closed is True
+    assert spider.get_stats()["closed"] is True
+    assert spider.stats["finish_time"] is not None
+    assert stopped == [spider]
+
+
+@pytest.mark.asyncio
+async def test_close_cancels_inflight_and_drains_queue():
+    """E2: close() cancels running work, drains queued slots, leaves audit idle"""
+    spider = NoopSpider(retry_delay=0)
+    started = asyncio.Event()
+
+    async def hung_fetch(request):
+        started.set()
+        await asyncio.sleep(10)
+        return httpx.Response(200, request=httpx.Request("GET", request.url))
+
+    async with offline_spider(spider, site_handler):
+        spider.downloader.fetch = hung_fetch
+        for index in range(3):
+            await spider._schedule(
+                Request(url=f"http://example.com/{index}", callback=spider.parse)
+            )
+
+        slot = await spider.scheduler.get_request()
+        task = asyncio.create_task(spider.process_request(slot.request, slot=slot))
+        spider._inflight[task] = slot.request
+        task.add_done_callback(spider._on_task_done)
+        await started.wait()
+
+        await spider.close()
+
+        assert task.done() and task.cancelled()
+        assert spider._inflight == {}
+        assert spider.scheduler.request_queue.qsize() == 0
+        assert spider.scheduler.stats["discarded_on_close"] == 2
+        assert spider.stats["cancelled_requests"] == 1
+        assert spider.stats["failed_requests"] == 0
+        assert spider.get_stats()["closed"] is True
+
+        audit = spider.scheduler.audit()
+        assert audit["idle"] is True
+        assert audit["mismatch_count"] == 0
+        assert audit["current_requests"] == 0
+        assert spider.downloader.client.is_closed is True
+
+
+@pytest.mark.asyncio
+async def test_close_is_idempotent_and_concurrent_safe():
+    """I7: repeated and concurrent close() releases once and never raises"""
+    spider = NoopSpider()
+    stopped = []
+    spider.signals.connect("spider_stopped", lambda sender: stopped.append(sender))
+
+    calls = {"n": 0}
+    original_close = spider.downloader.close
+
+    async def counting_close():
+        calls["n"] += 1
+        await original_close()
+
+    spider.downloader.close = counting_close
+
+    await asyncio.gather(spider.close(), spider.close(), spider.close())
+    await spider.close()
+
+    assert calls["n"] == 1
+    assert stopped == [spider]
+
+
+@pytest.mark.asyncio
+async def test_start_after_close_raises():
+    """I8: shutdown is terminal"""
+    spider = NoopSpider()
+    await spider.close()
+
+    with pytest.raises(RuntimeError, match="closed"):
+        await spider.start()
+
+
+@pytest.mark.asyncio
+async def test_task_escape_is_counted_and_consumed():
+    """E4: escaped BaseException is consumed by the done callback, not leaked"""
+    import gc
+
+    spider = EscapingSpider(retry_delay=0, idle_grace=0)
+    loop = asyncio.get_running_loop()
+    reported = []
+    previous = loop.get_exception_handler()
+    loop.set_exception_handler(lambda loop, context: reported.append(context))
+
+    try:
+        async with offline_spider(spider, site_handler):
+            await asyncio.wait_for(spider.start(), timeout=5)
+        gc.collect()
+        await asyncio.sleep(0)
+    finally:
+        loop.set_exception_handler(previous)
+
+    assert spider.stats["unhandled_task_errors"] == 1
+    assert spider.stats["failed_requests"] == 0
+    assert all(
+        "never retrieved" not in str(context.get("message", ""))
+        for context in reported
+    )
+
+
+@pytest.mark.asyncio
+async def test_idle_grace_controls_exit_delay():
+    """E5: idle_grace=0 exits at once, a positive grace keeps the loop waiting"""
+    fast_spider = DemoSpider(retry_delay=0, idle_grace=0)
+    async with offline_spider(fast_spider, site_handler):
+        started = time.monotonic()
+        await asyncio.wait_for(fast_spider.start(), timeout=10)
+        fast = time.monotonic() - started
+
+    slow_spider = DemoSpider(retry_delay=0, idle_grace=0.5)
+    async with offline_spider(slow_spider, site_handler):
+        started = time.monotonic()
+        await asyncio.wait_for(slow_spider.start(), timeout=10)
+        slow = time.monotonic() - started
+
+    assert fast < 0.2
+    assert slow >= 0.5
+
+
+@pytest.mark.asyncio
+async def test_context_manager_closes_without_starting():
+    """async with provides the minimal close guarantee"""
+    async with NoopSpider() as spider:
+        assert spider._running is False
+        assert spider.downloader.client.is_closed is False
+
+    assert spider.downloader.client.is_closed is True
+    assert spider.get_stats()["closed"] is True
+
+
+@pytest.mark.asyncio
+async def test_schedule_after_close_returns_none():
+    """Closed spiders drop new requests instead of enqueueing them"""
+    spider = NoopSpider()
+    await spider.close()
+
+    result = await spider._schedule(Request(url="http://example.com/late"))
+
+    assert result is None
+    assert spider.scheduler.request_queue.qsize() == 0
+    assert spider.scheduler.stats["current_requests"] == 0

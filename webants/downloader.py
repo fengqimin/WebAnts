@@ -460,16 +460,17 @@ class Downloader(BaseDownloader):
         self.logger.info(f"Start {self.__class__.__name__}...")
 
         self.logger.debug(f"Downloader started with {many} workers.")
+        workers = [asyncio.create_task(self.start_worker()) for _ in range(many)]
         try:
-            __ = [asyncio.create_task(self.start_worker()) for _ in range(many)]
             await self.request_queue.join()
-            for task in asyncio.all_tasks():
-                if task is not asyncio.current_task():
-                    task.cancel()
         except asyncio.CancelledError:
             self.logger.info(f"{self.__class__.__name__} has been cancelled.")
-        except Exception as e:
-            raise e
+        finally:
+            # Only our own workers: cancelling ``asyncio.all_tasks()`` would
+            # also kill the caller's tasks, which a library must never do.
+            for task in workers:
+                task.cancel()
+            await asyncio.gather(*workers, return_exceptions=True)
 
     async def close(self) -> None:
         await self.client.aclose()
