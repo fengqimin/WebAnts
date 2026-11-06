@@ -248,6 +248,10 @@ async def test_invalid_yield_goes_to_errback_once():
         assert spider.stats["successful_requests"] == 0
         assert spider.stats["failed_requests"] == 1
         assert spider._inflight == {}
+        # Exception path must restore the domain permit just like the others.
+        audit = spider.scheduler.audit()
+        assert audit["mismatch_count"] == 0
+        assert audit["idle"] is True
 
 
 @pytest.mark.asyncio
@@ -521,6 +525,32 @@ async def test_close_cancels_inflight_and_drains_queue():
         assert audit["mismatch_count"] == 0
         assert audit["current_requests"] == 0
         assert spider.downloader.client.is_closed is True
+
+
+@pytest.mark.asyncio
+async def test_close_counts_cancelled_direct_requests():
+    """A directly awaited process_request() has no done callback; close counts it"""
+    spider = NoopSpider(retry_delay=0)
+    started = asyncio.Event()
+
+    async def hung_fetch(request):
+        started.set()
+        await asyncio.sleep(10)
+        return httpx.Response(200, request=httpx.Request("GET", request.url))
+
+    async with offline_spider(spider, site_handler):
+        spider.downloader.fetch = hung_fetch
+        await spider._schedule(Request(url="http://example.com/direct", callback=spider.parse))
+        slot = await spider.scheduler.get_request()
+        task = asyncio.create_task(spider.process_request(slot.request, slot=slot))
+        await started.wait()
+
+        await spider.close()
+
+        assert task.cancelled()
+        assert spider.stats["cancelled_requests"] == 1
+        assert spider._inflight == {}
+        assert spider.scheduler.audit()["idle"] is True
 
 
 @pytest.mark.asyncio

@@ -675,6 +675,15 @@ class Spider:
             self.stats["successful_requests"] += 1
             self.signals.send("request_finished", self, request=request, success=True)
 
+        except asyncio.CancelledError:
+            # Tasks registered by the main loop are counted by their done
+            # callback. A directly awaited process_request() has no such
+            # callback, so count its cancellation here to keep the statistic
+            # truthful for both entry points.
+            if not tracked_externally:
+                self.stats["cancelled_requests"] += 1
+            raise
+
         except Exception as e:
             action, replacement = await self._apply_middleware_exception(e, request)
 
