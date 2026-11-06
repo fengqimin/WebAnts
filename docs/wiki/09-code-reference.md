@@ -287,4 +287,4 @@
 | `tests/conftest.py` | — | `http_client`、`sample_html` fixture | 将仓库根加入 `sys.path` |
 | `example/use_item.py` | — | `LinkItemDescriptor` / `TextItemDescriptor` | import 即执行 |
 
-阶段 5 完成后合计 242 个测试用例（`uv run pytest -q` 报告 `242 passed`，2026-11-05）；上表为阶段 4 时的文件级拆分，新增用例分布在 `test_request.py`、`test_downloader.py`、`test_extractor.py`、`test_persister.py`、`test_result.py`、`test_spider.py`、`test_url.py`、`test_statistic.py`、`test_login_tool.py`、`test_package.py`。
+阶段 5 完成后合计 243 个测试用例（`uv run pytest -q` 报告 `243 passed`，2026-11-06）；上表为阶段 4 时的文件级拆分，新增用例分布在 `test_request.py`、`test_downloader.py`、`test_extractor.py`、`test_persister.py`、`test_result.py`、`test_spider.py`、`test_url.py`、`test_statistic.py`、`test_login_tool.py`、`test_package.py`。

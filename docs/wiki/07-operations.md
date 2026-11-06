@@ -35,7 +35,7 @@ uv sync --extra monitoring
 ## 7.3 验证安装
 
 ```bash
-# 已验证：242 passed（离线）
+# 已验证：243 passed（离线）
 uv run pytest -q
 
 # 已验证：0 errors
@@ -59,7 +59,7 @@ uv run ruff format --check .
 | 模式 | 入口 | 说明 | 验证状态 |
 |------|------|------|----------|
 | 库调用 | 继承 `Spider`，`await start()` | 唯一的正式用法；无 CLI | 主链路按 ADR-0001 修复，关闭与收敛按 ADR-0003 落地；由 `tests/test_spider.py` 覆盖 |
-| 单元测试 | `uv run pytest` | 17 个测试文件、242 个用例 | 已验证：242 passed |
+| 单元测试 | `uv run pytest` | 17 个测试文件、243 个用例 | 已验证：243 passed |
 | 示例脚本 | `PYTHONPATH=. python example/use_item.py` | 只演示 Item 描述符，不联网；import 即执行 | 已验证（不带 `PYTHONPATH` 时找不到 `webants` 包） |
 | Worker 模式 | `Downloader.start_downloader(many)` | 兼容适配器，调用 `fetch`；`RequestError` 只记录日志 | `try/finally` 只取消自建 worker（`webants/downloader.py:457-472`，P1-20 Closed） |
 | 中间件/持久化 | 手工组装 `MiddlewareManager`/`PersisterManager` | 框架不自动接线 | 静态阅读 |

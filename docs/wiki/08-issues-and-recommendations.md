@@ -24,11 +24,11 @@
 
 ## 8.2 验证环境与证据
 
-所有结论基于 `master @ 23f8051`，Python 3.12.11，`uv 0.13.6`。下表中的数量为 **最近一次复测值（2026-11-05，ADR-0003 实施后）**。
+所有结论基于基线 `master @ 23f8051`，Python 3.12.11，`uv 0.13.6`。下表为**基线复现证据**（问题修复前的现象）；其中「测试套件」「Lint」「导入排序」「格式检查」四行记录的是**最近一次复测值（2026-11-06）**，修复后的状态见 [8.13 实施状态](#813-实施状态)。
 
 | 验证项 | 命令 / 脚本 | 实际结果 |
 |--------|-------------|----------|
-| 测试套件 | `uv run pytest -q` | `242 passed`，无失败用例 |
+| 测试套件 | `uv run pytest -q` | `243 passed`，无失败用例 |
 | Lint | `uv run ruff check .` | `All checks passed`（阶段 5 清理后） |
 | 导入排序 | `uv run python -m isort --check .` | 通过；CLI 入口在 Windows 下仍报 `Failed to canonicalize script path` |
 | 格式检查 | `uv run ruff format --check .` | 通过（black 已由 `ruff format` 替代；`docs` 排除） |
@@ -625,15 +625,15 @@ await self.request_queue.put((request.priority, request))
 | 2 | P1-01、P1-02、P1-04、P1-18、P1-20、P2-20、P2-23（已完成 2026-11-05） | 生命周期与资源泄漏 | 异常、取消、熔断三种场景下计数恢复；ADR-0002 落地槽位所有权，ADR-0003 落地关闭/取消/收敛契约 |
 | 3 | P1-05、P1-06、P1-07、P1-08、P1-15 ~ P1-17、P2-15 ~ P2-17（已完成 2026-11-05，[ADR-0004](../adr/0004-data-correctness-link-filter-config-cache-signal.md)） | 数据正确性 | 提取器矩阵、Config 合并、缓存统计、信号排序全部通过 |
 | 4 | P1-09、P1-10、P1-11、P2-19（已完成 2026-11-05，[ADR-0005](../adr/0005-optional-layer-wiring-and-persistence-lifecycle.md)） | 可选层接入与关闭语义 | flush 后条数一致；缓存命中语义明确；组装示例可运行（`example/optional_layers.py`） |
-| 5 | 其余 P2 + CI + 仓库卫生（ADR 已接受：[ADR-0006](../adr/0006-engineering-closeout-p2-ci-and-hygiene.md)，实施中） | 收口 | `ruff`、`isort`、`ruff format`、`pytest` 在 CI 全绿 |
+| 5 | 其余 P2 + CI + 仓库卫生（已完成 2026-11-05，[ADR-0006](../adr/0006-engineering-closeout-p2-ci-and-hygiene.md)） | 收口 | `ruff`、`isort`、`ruff format`、`pytest` 在 CI 全绿 |
 
 ## 8.12 验收清单
 
-- [x] `uv run pytest -q` 无失败，且包含 `tests/test_spider.py`（2026-11-05：242 passed）。
-- [ ] 子类以 `async def parse(...): yield ...` 定义时，`start_requests()` 不再触发 `AssertionError`。
-- [ ] 回调三种形态（async generator / 普通协程返回单值 / 抛异常）均有测试覆盖。
-- [ ] 用 mock HTTP 完成一次“初始页 → 解析出 2 个链接 → 抓取子页 → 产出 Result”的端到端测试。
-- [ ] 调度器在异常、取消、熔断三种场景下，`active_requests` 与域名信号量恢复到初始值。
+- [x] `uv run pytest -q` 无失败，且包含 `tests/test_spider.py`（2026-11-06：243 passed）。
+- [x] 子类以 `async def parse(...): yield ...` 定义时，`start_requests()` 不再触发 `AssertionError`（`test_start_requests_accepts_async_generator_parse`）。
+- [x] 回调三种形态（async generator / 普通协程返回单值 / 抛异常）均有测试覆盖。
+- [x] 用 mock HTTP 完成一次“初始页 → 解析出 2 个链接 → 抓取子页 → 产出 Result”的端到端测试（`test_end_to_end_async_generator_callback`）。
+- [x] 调度器在异常、取消、熔断三种场景下，`active_requests` 与域名信号量恢复到初始值（对应用例均断言 `audit()["idle"]`）。
 - [x] `FilteringLinkExtractor(normalize=False)` 不再抛异常；`normalize=True` 的返回 URL 已归一化。
 - [x] `extract_and_filter_links` 在不传 `hosts_allow`/`extensions_allow` 时返回非空结果。
 - [x] `Config` 加载嵌套 YAML 后，顶层不出现子键，默认值保持不变；环境变量可覆盖嵌套键。
@@ -643,7 +643,7 @@ await self.request_queue.put((request.priority, request))
 
 ## 8.13 实施状态
 
-> 更新于 2026-11-05。实现依据 [ADR-0001](../adr/0001-callback-contract-and-retry-ownership.md)（Accepted）、[ADR-0002](../adr/0002-schedule-slot-ownership-and-request-lifecycle.md)（Accepted）、[ADR-0003](../adr/0003-shutdown-cancellation-and-loop-quiescence.md)（Accepted）、[ADR-0004](../adr/0004-data-correctness-link-filter-config-cache-signal.md)（Accepted）、[ADR-0005](../adr/0005-optional-layer-wiring-and-persistence-lifecycle.md)（Accepted）与 [ADR-0006](../adr/0006-engineering-closeout-p2-ci-and-hygiene.md)（Accepted）。
+> 更新于 2026-11-06。实现依据 [ADR-0001](../adr/0001-callback-contract-and-retry-ownership.md)（Accepted）、[ADR-0002](../adr/0002-schedule-slot-ownership-and-request-lifecycle.md)（Accepted）、[ADR-0003](../adr/0003-shutdown-cancellation-and-loop-quiescence.md)（Accepted）、[ADR-0004](../adr/0004-data-correctness-link-filter-config-cache-signal.md)（Accepted）、[ADR-0005](../adr/0005-optional-layer-wiring-and-persistence-lifecycle.md)（Accepted）与 [ADR-0006](../adr/0006-engineering-closeout-p2-ci-and-hygiene.md)（Accepted）。
 
 | 条目 | 状态 | 证据 / 说明 |
 |------|------|-------------|
@@ -695,7 +695,7 @@ await self.request_queue.put((request.priority, request))
 
 阶段 5（P2-02/03/04/05/06/07/08/09/10/11/12/13/14/18/21 + 新登记的 P2-24）的依据是 [ADR-0006](../adr/0006-engineering-closeout-p2-ci-and-hygiene.md)（Accepted，2026-11-05），已按 T1–T8 实施完成：依赖与构建收口、README 重构、请求头/排序/提取器/序列化/URL/统计边界修正、`ruff format` 与 CI 双版本门禁。`setup.py`、`requirements.txt` 已删除。
 
-当前测试基线：`uv run pytest -q` → `242 passed`（离线）。`uv run ruff check .`、`uv run python -m isort --check .`、`uv run ruff format --check .` 全部通过，CI 在 Python 3.12 与 3.14 上复跑。`isort` 需用 `uv run python -m isort`（CLI 入口报 `Failed to canonicalize script path`）。
+当前测试基线：`uv run pytest -q` → `243 passed`（离线）。`uv run ruff check .`、`uv run python -m isort --check .`、`uv run ruff format --check .` 全部通过，CI 在 Python 3.12 与 3.14 上复跑。`isort` 需用 `uv run python -m isort`（CLI 入口报 `Failed to canonicalize script path`）。
 
 ## 附录 A 原版勘误表
 

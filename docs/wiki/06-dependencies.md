@@ -108,7 +108,7 @@ flowchart TD
 
 | 命令 | 结果 | 说明 |
 |------|------|------|
-| `uv run pytest -q` | **242 passed** | 全绿且离线 |
+| `uv run pytest -q` | **243 passed** | 全绿且离线 |
 | `uv run ruff check .` | **All checks passed** | 10 个历史 F401 已清理 |
 | `uv run python -m isort --check .` | **通过** | 仅 3 个文件被跳过（与仓库无关） |
 | `uv run ruff format --check .` | **通过** | black 已由 `ruff format` 替代；`docs` 被排除（避免格式化历史 ADR 的 Markdown 代码块） |
